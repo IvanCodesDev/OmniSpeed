@@ -1,9 +1,0 @@
-OpenModel 交付文件清单
-建模论文.docx
-建模论文.pdf
-paper.tex
-prediction.py
-optimization.py
-cleaned_data.csv
-figures.zip
-experiment_log.json
