@@ -26,6 +26,8 @@ pub enum Adapter {
     PotPlayer { hwnd: isize },
     /// MPC-HC WM_COMMAND 命令码：仅档位步进，无需前台
     MpcHc { hwnd: isize },
+    /// 浏览器扩展（Native Messaging）：精确设速，真实状态经扩展异步上报（开发文档 §3 非对称控制）
+    Browser { process: String },
     /// 模拟播放器自身快捷键：需要目标窗口前台（开发文档 §7.3 兜底通道）
     Keys { hwnd: isize, keys: KeyBindings },
 }
@@ -33,6 +35,10 @@ pub enum Adapter {
 /// 按规则与当前目标构建通道列表（method=auto 时 IPC/消息在前、按键殿后）
 pub fn adapters_for(rule: &AppRule, target: &CurrentTarget) -> Vec<Adapter> {
     let mut list = Vec::new();
+    if rule.method == RuleMethod::Extension {
+        list.push(Adapter::Browser { process: target.process_name.clone() });
+        return list;
+    }
     let want_ipc = matches!(rule.method, RuleMethod::Auto | RuleMethod::Ipc);
     let want_keys = matches!(rule.method, RuleMethod::Auto | RuleMethod::Hotkey);
 
@@ -86,7 +92,8 @@ fn resolve_hwnd(classes: &[&str], target: &CurrentTarget) -> isize {
 }
 
 impl Adapter {
-    /// 无副作用回读真实倍速（mpv / VLC / PotPlayer 支持）
+    /// 无副作用回读真实倍速（mpv / VLC / PotPlayer 支持；
+    /// 浏览器的真实状态由扩展异步上报，router 直接读 Core.browser_media）
     pub fn read_rate(&self) -> Option<f64> {
         match self {
             Adapter::Mpv(c) => c.get_speed().ok(),
@@ -123,6 +130,10 @@ impl Adapter {
                     None => Err("PotPlayer 未响应速度回读".into()),
                 }
             }
+            // 下发即返回；真实生效值由扩展经 media 帧异步上报（nm_bridge 负责回写与广播）
+            Adapter::Browser { process } => {
+                crate::nm_bridge::send_set_rate(process, rate).map(|_| None)
+            }
             Adapter::MpcHc { .. } | Adapter::Keys { .. } => {
                 Err("该通道仅支持步进，不支持设置精确倍速".into())
             }
@@ -133,9 +144,8 @@ impl Adapter {
     pub fn step(&self, dir: i32) -> Result<(), String> {
         match self {
             // 可精确设值的通道不走播放器档位：上层直接用 set_rate
-            Adapter::Mpv(_) | Adapter::Vlc(_) | Adapter::PotPlayer { .. } => {
-                Err("该通道请使用 set_rate".into())
-            }
+            Adapter::Mpv(_) | Adapter::Vlc(_) | Adapter::PotPlayer { .. }
+            | Adapter::Browser { .. } => Err("该通道请使用 set_rate".into()),
             Adapter::MpcHc { hwnd } => {
                 if !window_alive(*hwnd) {
                     return Err("MPC-HC 窗口不存在".into());
@@ -153,7 +163,8 @@ impl Adapter {
 
     pub fn reset(&self) -> Result<ReadBack, String> {
         match self {
-            Adapter::Mpv(_) | Adapter::Vlc(_) | Adapter::PotPlayer { .. } => self.set_rate(1.0),
+            Adapter::Mpv(_) | Adapter::Vlc(_) | Adapter::PotPlayer { .. }
+            | Adapter::Browser { .. } => self.set_rate(1.0),
             Adapter::MpcHc { hwnd } => {
                 if !window_alive(*hwnd) {
                     return Err("MPC-HC 窗口不存在".into());
@@ -172,6 +183,7 @@ impl Adapter {
         match self {
             Adapter::Mpv(c) => c.play_pause().map_err(|e| e.to_string()),
             Adapter::Vlc(c) => c.play_pause().map_err(|e| e.to_string()),
+            Adapter::Browser { process } => crate::nm_bridge::send_play_pause(process),
             Adapter::PotPlayer { hwnd } => {
                 if !window_alive(*hwnd) {
                     return Err("PotPlayer 窗口不存在".into());

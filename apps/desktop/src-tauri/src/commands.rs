@@ -2,10 +2,10 @@
 
 use crate::rules::{running_processes, to_app_info, AppInfo, AppRulePatch};
 use crate::state::{
-    clamp_rate, Core, CoreSnapshot, CoreState, MediaSession, ShortcutAction, ShortcutMap,
-    RATE_MAX, RATE_MIN,
+    clamp_rate, Core, CoreSnapshot, CoreState, MediaSession, Settings, ShortcutAction,
+    ShortcutMap, RATE_MAX,
 };
-use crate::{hotkey, persist};
+use crate::{hotkey, nm_bridge, persist};
 use std::collections::HashMap;
 use tauri::{AppHandle, Emitter, State};
 
@@ -17,20 +17,46 @@ pub fn get_core_state(state: State<CoreState>) -> CoreSnapshot {
 
 /// UI 侧（滑块/预设/最近媒体）调速后同步权威值；返回收口后的实际倍速
 #[tauri::command]
-pub fn set_rate(state: State<CoreState>, rate: f64) -> f64 {
-    let mut core = state.lock().expect("core state poisoned");
-    core.rate = clamp_rate(rate, RATE_MAX);
-    core.rate
+pub fn set_rate(app: AppHandle, state: State<CoreState>, rate: f64) -> f64 {
+    let (rate, remembered) = {
+        let mut core = state.lock().expect("core state poisoned");
+        core.rate = clamp_rate(rate, RATE_MAX);
+        (core.rate, core.remember_rate())
+    };
+    if remembered {
+        persist::save_memory_debounced(&app);
+    }
+    rate
 }
 
-/// 设置页变更步长/滑块上限时同步（热键步进依赖这两个值）
+/// 设置页保存（前端每次变更推送完整设置对象；Rust 侧为权威并落盘）。
+/// 涉及系统状态的项（开机自启）在此对齐；preservesPitch 变化即时广播给已连接的浏览器扩展。
 #[tauri::command]
-pub fn sync_rate_config(state: State<CoreState>, step: f64, slider_max: f64) {
-    let mut core = state.lock().expect("core state poisoned");
-    core.step = step.clamp(0.05, 1.0);
-    core.slider_max = slider_max.clamp(RATE_MIN, RATE_MAX);
-    // 上限调低时收拢当前倍速（与前端 store 行为一致）
-    core.rate = clamp_rate(core.rate, core.slider_max);
+pub fn save_settings(
+    app: AppHandle,
+    state: State<CoreState>,
+    mut settings: Settings,
+) -> Result<(), String> {
+    settings.normalize();
+    let (pitch_changed, autostart_changed) = {
+        let mut core = state.lock().expect("core state poisoned");
+        let prev = core.settings.clone();
+        core.settings = settings.clone();
+        // 上限调低时收拢当前倍速（与前端 store 行为一致）
+        core.rate = clamp_rate(core.rate, core.settings.slider_max);
+        persist::save(&app, &core)?;
+        (
+            prev.preserves_pitch != settings.preserves_pitch,
+            prev.start_on_boot != settings.start_on_boot,
+        )
+    };
+    if pitch_changed {
+        nm_bridge::set_preserves_pitch(settings.preserves_pitch);
+    }
+    if autostart_changed {
+        crate::sync_autostart(&app, settings.start_on_boot);
+    }
+    Ok(())
 }
 
 /// 保存并重新注册全部快捷键；返回冲突表（动作 → 原因），空表 = 全部注册成功
@@ -65,10 +91,13 @@ pub fn set_hotkeys_enabled(
 
 // ---------- M2：应用规则与当前媒体 ----------
 
-fn apps_snapshot(core: &Core) -> Vec<AppInfo> {
+pub(crate) fn apps_snapshot(core: &Core) -> Vec<AppInfo> {
     // 先扫进程再组装，进程扫描（数十毫秒）不放在持锁热路径里由调用方保证
     let running = running_processes();
-    core.rules.iter().map(|r| to_app_info(r, &running)).collect()
+    core.rules
+        .iter()
+        .map(|r| to_app_info(r, &running, &core.connected_browsers))
+        .collect()
 }
 
 /// 应用页列表：内置 + 用户规则，附运行状态
@@ -139,11 +168,14 @@ pub fn set_listening(app: AppHandle, state: State<CoreState>, enabled: bool) {
 /// （下发是异步的，可回读通道的真实值随后经 media:changed 校正）
 #[tauri::command]
 pub fn apply_to_current(app: AppHandle, state: State<CoreState>, rate: f64) -> Result<f64, String> {
-    let target = {
+    let (target, remembered) = {
         let mut core = state.lock().expect("core state poisoned");
         core.rate = clamp_rate(rate, RATE_MAX);
-        core.rate
+        (core.rate, core.remember_rate())
     };
+    if remembered {
+        persist::save_memory_debounced(&app);
+    }
     crate::router::push_rate_async(&app, crate::router::PushMode::ExactOnly);
     Ok(target)
 }

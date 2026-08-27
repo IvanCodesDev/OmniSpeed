@@ -4,11 +4,13 @@
   "version": "0.1.0",
   "description": "全局倍速播放遥控器 —— 一个应用、一套快捷键，统一控制所有媒体的播放速度",
   "workspaces": [
-    "apps/desktop"
+    "apps/desktop",
+    "apps/extension"
   ],
   "scripts": {
     "dev": "npm run dev -w @omnispeed/desktop",
     "build": "npm run build -w @omnispeed/desktop",
-    "tauri": "npm run tauri -w @omnispeed/desktop --"
+    "tauri": "npm run tauri -w @omnispeed/desktop --",
+    "ext:build": "npm run build -w @omnispeed/extension"
   }
 }

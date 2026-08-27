@@ -95,7 +95,7 @@ impl AppRule {
     /// 展示文案（前端 methodLabel）
     pub fn method_label(&self) -> String {
         match self.method {
-            RuleMethod::Extension => "浏览器扩展（M3）".into(),
+            RuleMethod::Extension => "浏览器扩展".into(),
             RuleMethod::Hotkey => "快捷键".into(),
             RuleMethod::Ipc => "IPC 接口".into(),
             RuleMethod::Auto => {
@@ -259,13 +259,25 @@ pub struct AppInfo {
     pub ipc_config: Option<IpcSettings>,
 }
 
-pub fn to_app_info(rule: &AppRule, running: &HashSet<String>) -> AppInfo {
+/// connected：扩展已连接的浏览器进程名集合（NM 桥维护），
+/// 浏览器条目的状态由它决定（已连接 / 需要设置）
+pub fn to_app_info(
+    rule: &AppRule,
+    running: &HashSet<String>,
+    connected: &HashSet<String>,
+) -> AppInfo {
+    let mut status = rule.status();
+    if rule.kind == AppKind::Browser
+        && (connected.contains(&rule.process) || rule.aliases.iter().any(|a| connected.contains(a)))
+    {
+        status = AppStatus::Connected;
+    }
     AppInfo {
         id: rule.id.clone(),
         name: rule.name.clone(),
         process: rule.process.clone(),
         kind: rule.kind,
-        status: rule.status(),
+        status,
         method: rule.method,
         method_label: rule.method_label(),
         ipc: rule.ipc,

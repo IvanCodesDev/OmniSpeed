@@ -8,13 +8,62 @@
 //!      以真实值校正 Core.rate 并广播 media:changed。
 
 use crate::adapters::{adapters_for, Adapter};
+use crate::rules::AppKind;
 use crate::state::{clamp_rate, Core, CoreState, RATE_MAX};
 use tauri::{AppHandle, Emitter, Manager};
 
-/// 无副作用回读当前接管对象的真实倍速（monitor 切换目标时用；调用方持锁）
+/// 当前接管对象的通道；前台尚未匹配到播放器时（焦点在编辑器等），
+/// 回退到「已连接且活动标签有媒体」的唯一浏览器——全局热键仍应遥控正在看的网页视频。
+pub(crate) fn adapters_for_current_or_browser(core: &Core) -> Vec<Adapter> {
+    if let (Some(target), Some(rule)) = (core.current.as_ref(), core.current_rule()) {
+        if rule.kind == AppKind::Browser
+            && core
+                .browser_media
+                .get(&target.process_name)
+                .map(|m| m.is_live)
+                .unwrap_or(false)
+        {
+            return Vec::new();
+        }
+        let list = adapters_for(rule, target);
+        if !list.is_empty() {
+            return list;
+        }
+    }
+    browser_fallback_adapters(core)
+}
+
+fn browser_fallback_adapters(core: &Core) -> Vec<Adapter> {
+    let mut found = Vec::new();
+    for process in &core.connected_browsers {
+        let media = core.browser_media.get(process);
+        if media.map(|m| m.is_live).unwrap_or(false) {
+            continue;
+        }
+        // 尚无 media 帧时也允许下发：hello 已证明扩展在线，setRate 由 SW 路由到有媒体的标签
+        found.push(Adapter::Browser {
+            process: process.clone(),
+        });
+    }
+    if found.len() == 1 {
+        found
+    } else {
+        Vec::new()
+    }
+}
+
+/// 无副作用回读当前接管对象的真实倍速（monitor 切换目标时用；调用方持锁）。
+/// 浏览器目标直接读扩展最近一次上报（Core.browser_media），不发起 IO
 pub fn read_current_rate(core: &Core) -> Option<f64> {
     let target = core.current.as_ref()?;
     let rule = core.current_rule()?;
+    if rule.kind == crate::rules::AppKind::Browser {
+        return core
+            .browser_media
+            .get(&target.process_name)
+            .filter(|m| m.has_media)
+            .map(|m| m.rate);
+    }
     adapters_for(rule, target)
         .iter()
         .find_map(Adapter::read_rate)
@@ -46,14 +95,12 @@ fn push_rate_blocking(app: &AppHandle, mode: PushMode) {
         if !core.listening {
             return;
         }
-        let (Some(target), Some(rule)) = (core.current.as_ref(), core.current_rule()) else {
+        let adapters = adapters_for_current_or_browser(&core);
+        if adapters.is_empty() {
             return;
-        };
-        (core.rate, adapters_for(rule, target))
+        }
+        (core.rate, adapters)
     };
-    if adapters.is_empty() {
-        return;
-    }
 
     // 逐通道尝试：任一通道成功即止
     let mut read_back = None;
@@ -63,7 +110,7 @@ fn push_rate_blocking(app: &AppHandle, mode: PushMode) {
             PushMode::Reset => adapter.reset(),
             PushMode::Step { dir } => match adapter.set_rate(target_rate) {
                 ok @ Ok(_) => ok,
-                // IPC 不可用/通道不支持精确值 → 按播放器自身档位步进一档
+                // IPC/扩展通道不可用时退回播放器自身的步进档位
                 Err(_) => adapter.step(dir).map(|_| None),
             },
             PushMode::ExactOnly => adapter.set_rate(target_rate),
@@ -101,10 +148,7 @@ pub fn play_pause_async(app: &AppHandle) {
             if !core.listening {
                 return;
             }
-            let (Some(target), Some(rule)) = (core.current.as_ref(), core.current_rule()) else {
-                return;
-            };
-            adapters_for(rule, target)
+            adapters_for_current_or_browser(&core)
         };
         for adapter in &adapters {
             if adapter.play_pause().is_ok() {

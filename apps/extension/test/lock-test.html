@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>OmniSpeed · Rate-Guard 锁定验证页</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center; gap: 20px;
+    padding: 32px 24px;
+    font-family: "Segoe UI", system-ui, sans-serif;
+    background: #0d1117; color: #e6edf3;
+  }
+  h1 { font-size: 18px; font-weight: 600; margin: 0; color: #8b949e; }
+  #rate-display {
+    font-size: 140px; font-weight: 800; line-height: 1;
+    font-variant-numeric: tabular-nums;
+    font-family: Consolas, monospace;
+    color: #3fb950;
+  }
+  #rate-display.reset-hit { color: #f85149; }
+  #rate-caption { font-size: 14px; color: #8b949e; margin-top: -12px; }
+  video { width: 480px; border-radius: 8px; background: #000; }
+  .controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: center; }
+  button {
+    padding: 10px 18px; font-size: 15px; border-radius: 8px; border: 1px solid #30363d;
+    background: #21262d; color: #e6edf3; cursor: pointer;
+  }
+  button:hover { background: #30363d; }
+  label { display: flex; align-items: center; gap: 8px; font-size: 15px; cursor: pointer; }
+  #log {
+    width: 640px; max-width: 90vw; height: 160px; overflow-y: auto;
+    font-family: Consolas, monospace; font-size: 12px;
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px;
+    white-space: pre-wrap;
+  }
+  .hint { max-width: 640px; font-size: 13px; color: #8b949e; line-height: 1.7; }
+</style>
+</head>
+<body>
+  <h1>OmniSpeed · Rate-Guard 倍速锁定验证页</h1>
+
+  <div id="rate-display">1.00×</div>
+  <div id="rate-caption">video.playbackRate 实时读数（ratechange + 500ms 轮询）</div>
+
+  <video id="v" muted autoplay playsinline loop></video>
+
+  <div class="controls">
+    <label>
+      <input type="checkbox" id="reset-toggle" checked />
+      站点复位模拟（每秒执行 <code>video.playbackRate = 1</code>）
+    </label>
+    <button id="gesture-btn">模拟用户手势调速 → 1.5×</button>
+    <button id="playpause-btn">暂停 / 播放</button>
+  </div>
+
+  <pre id="log"></pre>
+
+  <div class="hint">
+    用法：加载 OmniSpeed 扩展后打开本页，用全局快捷键把倍速设为 5× 并开启锁定——
+    复位模拟开启时读数应保持 5.00× 不闪回（复位写入被 Rate-Guard 在 setter 层拦截，
+    ratechange 校正兜底）；点「模拟用户手势调速」写入发生在点击手势窗口内，应被放行、
+    读数变 1.5× 并同步为新目标。<br />
+    注意 ①：视频源是一段可寻址的静音 WAV（Blob URL），保证 playbackRate 属性可写——
+    <code>canvas.captureStream()</code> 在 Chromium 上赋值会被内核忽略、属性永远停在 1×，无法验证锁定。<br />
+    注意 ②：为保证读数确定性，复位模拟会跳过「最近 600ms 内有真实点击/按键」的那一拍——
+    否则复位写入恰好落进手势窗口会被当作用户调速放行（真实站点同样存在该竞态，
+    属 Rate-Guard 手势识别的既有边界，见开发文档 §5.2）。
+  </div>
+
+<script>
+  const video = document.getElementById("v");
+  const display = document.getElementById("rate-display");
+  const logEl = document.getElementById("log");
+  const resetToggle = document.getElementById("reset-toggle");
+
+  function log(msg) {
+    const ts = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    logEl.textContent = `[${ts}] ${msg}\n` + logEl.textContent;
+    const lines = logEl.textContent.split("\n");
+    if (lines.length > 60) logEl.textContent = lines.slice(0, 60).join("\n");
+  }
+
+  // ---- 可寻址静音 WAV 作为媒体源 ----
+  // 不能用 canvas.captureStream()：Chromium 对 MediaStream 实时流源会忽略 playbackRate
+  // 赋值（读写恒为 1），无法验证倍速锁定。静音 WAV 有真实时长，playbackRate 完全生效。
+  function silentWav(seconds) {
+    const sr = 8000;
+    const n = sr * seconds;
+    const buf = new ArrayBuffer(44 + n * 2);
+    const v = new DataView(buf);
+    const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    w(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); w(8, "WAVEfmt ");
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true);
+    v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    w(36, "data"); v.setUint32(40, n * 2, true);
+    return new Blob([buf], { type: "audio/wav" });
+  }
+  video.src = URL.createObjectURL(silentWav(30));
+  video.play().catch(() => log("自动播放被拒，请点击「暂停 / 播放」手动开始"));
+
+  // ---- 读数刷新：ratechange + 500ms 轮询双通道 ----
+  let lastShown = null;
+  function refreshDisplay(source) {
+    const r = video.playbackRate;
+    display.textContent = r.toFixed(2) + "\u00d7";
+    display.classList.toggle("reset-hit", r === 1 && lastShown !== null && lastShown !== 1);
+    if (r !== lastShown) {
+      log(`读数变化：${lastShown === null ? "-" : lastShown} → ${r}（${source}）`);
+      lastShown = r;
+    }
+  }
+  video.addEventListener("ratechange", () => refreshDisplay("ratechange"));
+  setInterval(() => refreshDisplay("poll"), 500);
+  refreshDisplay("init");
+
+  // ---- 站点复位模拟：每秒写回 1×（默认开启）----
+  // 跳过最近 600ms 内有真实用户交互的那一拍，避免复位写入落进
+  // Rate-Guard 的 500ms 手势窗口被误判为用户调速（见页面底部注意 ②）。
+  let lastRealGestureAt = -Infinity;
+  window.addEventListener("pointerdown", () => { lastRealGestureAt = Date.now(); }, true);
+  window.addEventListener("keydown", () => { lastRealGestureAt = Date.now(); }, true);
+
+  setInterval(() => {
+    if (!resetToggle.checked) return;
+    if (Date.now() - lastRealGestureAt < 600) {
+      log("复位模拟：本拍跳过（避开手势窗口）");
+      return;
+    }
+    video.playbackRate = 1;
+    log(`复位模拟：写入 1× → 实际读数 ${video.playbackRate}${video.playbackRate === 1 ? "（未锁定或目标即 1×）" : "（已被 Rate-Guard 拦截）"}`);
+  }, 1000);
+
+  resetToggle.addEventListener("change", () => {
+    log(`站点复位模拟：${resetToggle.checked ? "开启" : "关闭"}`);
+  });
+
+  // ---- 模拟用户手势调速：点击处理器内写 1.5×（落在手势窗口，应被放行并同步）----
+  document.getElementById("gesture-btn").addEventListener("click", () => {
+    video.playbackRate = 1.5;
+    log(`手势调速：写入 1.5× → 实际读数 ${video.playbackRate}（应放行并同步为新目标）`);
+  });
+
+  // ---- 暂停 / 播放 ----
+  document.getElementById("playpause-btn").addEventListener("click", () => {
+    if (video.paused) {
+      video.play().then(() => log("播放")).catch((e) => log("播放失败：" + e));
+    } else {
+      video.pause();
+      log("暂停");
+    }
+  });
+</script>
+</body>
+</html>

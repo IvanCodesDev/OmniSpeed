@@ -11,15 +11,17 @@ import {
   applyToCurrent,
   getCoreState,
   getCurrentMedia,
+  installUpdate,
   listApps,
   onAppsStatusChanged,
   onHotkeyTriggered,
   onMediaChanged,
+  onUpdateAvailable,
   pushAppRule,
   pushHotkeysEnabled,
   pushListening,
   pushRate,
-  pushRateConfig,
+  pushSettings,
   pushShortcuts,
   type ShortcutConflicts,
 } from "./lib/ipc";
@@ -101,6 +103,10 @@ interface AppStore {
   shortcuts: Record<ShortcutId, string[]>;
   /** 快捷键注册冲突（Rust 侧 RegisterHotKey 失败反馈，快捷键页行内标红） */
   conflicts: ShortcutConflicts;
+  /** 检查到的新版本号（null = 无更新），设置页页脚展示 */
+  updateAvailable: string | null;
+  /** 更新下载安装进行中（按钮防重复点击） */
+  updating: boolean;
   setPage: (page: Page) => void;
   toggleListening: () => void;
   setHotkeysEnabled: (enabled: boolean) => void;
@@ -118,6 +124,8 @@ interface AppStore {
   resetShortcuts: () => void;
   /** 保存并注册全部快捷键；返回是否全部注册成功 */
   saveShortcuts: () => Promise<boolean>;
+  /** 设置页「更新并重启」：下载安装新版本（成功后应用自动重启） */
+  installUpdateNow: () => Promise<void>;
 }
 
 const clampRate = (rate: number, max: number) =>
@@ -151,6 +159,8 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   siteRules: defaultSiteRules,
   shortcuts: { ...defaultShortcuts },
   conflicts: {},
+  updateAvailable: null,
+  updating: false,
   setPage: (page) => set({ page }),
   toggleListening: () => {
     const listening = !get().listening;
@@ -174,9 +184,10 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     const s = get();
     const target = clampRate(rate, MAX_RATE);
     const sliderMax = Math.max(s.settings.sliderMax, ceilingFor(target));
-    if (sliderMax !== s.settings.sliderMax) pushRateConfig(s.settings.step, sliderMax);
+    const settings = sliderMax !== s.settings.sliderMax ? { ...s.settings, sliderMax } : s.settings;
+    if (settings !== s.settings) pushSettings(settings);
     pushRate(target);
-    set({ rate: target, settings: { ...s.settings, sliderMax } });
+    set({ rate: target, settings });
   },
   stepRate: (dir) => {
     const s = get();
@@ -214,10 +225,8 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   updateSettings: (patch) => {
     const s = get();
     const settings = { ...s.settings, ...patch };
-    if (settings.step !== s.settings.step || settings.sliderMax !== s.settings.sliderMax) {
-      pushRateConfig(settings.step, settings.sliderMax);
-    }
-    // 调低上限时同步收拢当前倍速（Rust 侧 sync_rate_config 做同样的收口）
+    pushSettings(settings);
+    // 调低上限时同步收拢当前倍速（Rust 侧 save_settings 做同样的收口）
     set({ settings, rate: clampRate(s.rate, settings.sliderMax) });
   },
   updateSiteRule: (host, patch) =>
@@ -230,6 +239,16 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     const conflicts = await pushShortcuts(get().shortcuts);
     set({ conflicts });
     return Object.keys(conflicts).length === 0;
+  },
+  installUpdateNow: async () => {
+    if (get().updating) return;
+    set({ updating: true });
+    try {
+      await installUpdate(); // 成功后应用重启，走不到下面
+    } catch (err) {
+      console.error("更新失败", err);
+      set({ updating: false });
+    }
   },
 }));
 
@@ -254,9 +273,10 @@ export async function initCoreSync() {
       conflicts: snap.conflicts,
       currentMedia: media,
       apps: apps ?? [],
+      // 设置以 Rust 持久化值为权威（M4）
+      settings: snap.settings,
+      listening: snap.listening,
     });
-    const { step, sliderMax } = useAppStore.getState().settings;
-    pushRateConfig(step, sliderMax);
   } else {
     // 纯浏览器预览（npm run dev）：无 Rust 后端，应用列表与当前媒体回退到占位数据
     useAppStore.setState({ apps: managedApps, currentMedia: previewMedia });
@@ -273,6 +293,7 @@ export async function initCoreSync() {
     );
   });
   void onAppsStatusChanged((apps) => useAppStore.setState({ apps }));
+  void onUpdateAvailable((info) => useAppStore.setState({ updateAvailable: info.version }));
 }
 
 // 调试辅助：?page=… 直达指定页面（截图回归 / 深链用），

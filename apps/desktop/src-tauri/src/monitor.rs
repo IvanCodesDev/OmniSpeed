@@ -32,6 +32,7 @@ fn on_foreground_change(app: &AppHandle, info: ForegroundInfo) {
     // 未匹配的前台不清空接管对象（保留遥控），也就无需广播
     let Some(rule_id) = matched else { return };
 
+    let old_key = core.memory_key();
     core.current = Some(CurrentTarget {
         rule_id,
         hwnd: info.hwnd,
@@ -40,6 +41,20 @@ fn on_foreground_change(app: &AppHandle, info: ForegroundInfo) {
 
     if !core.listening {
         return;
+    }
+
+    // 按应用记忆（开发文档 §7.5）：切到另一个记忆键（新应用/新站点）且有记录时，
+    // 恢复上次用的倍速并主动下发。同一应用来回聚焦不触发（避免覆盖用户在播放器里的调整）
+    let new_key = core.memory_key();
+    if core.settings.remember_per_app && new_key != old_key {
+        if let Some(saved) = new_key.as_ref().and_then(|k| core.memory.get(k).copied()) {
+            core.rate = crate::state::clamp_rate(saved, crate::state::RATE_MAX);
+            let session = core.current_session(Some(core.rate));
+            drop(core);
+            let _ = app.emit("media:changed", &session);
+            router::push_rate_async(app, router::PushMode::ExactOnly);
+            return;
+        }
     }
 
     // 每次匹配的应用回到前台都回读同步（不只在切换时）：

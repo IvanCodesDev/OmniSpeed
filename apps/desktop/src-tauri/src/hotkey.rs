@@ -3,7 +3,8 @@
 
 use crate::osd;
 use crate::router::{self, PushMode};
-use crate::state::{clamp_rate, CoreState, ShortcutAction};
+use crate::rules::AppKind;
+use crate::state::{clamp_rate, Core, CoreState, ShortcutAction, RATE_MAX};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutEvent, ShortcutState};
@@ -15,6 +16,8 @@ pub struct HotkeyPayload {
     pub action: ShortcutAction,
     pub rate: f64,
     pub seq: u64,
+    /// OSD 副文案（如 >4× 的浏览器静音提示，开发文档 §7.8）
+    pub notice: Option<String>,
 }
 
 /// 前端修饰键 → 插件修饰键
@@ -105,7 +108,10 @@ pub fn apply_shortcuts(app: &AppHandle, core: &mut crate::state::Core) {
             continue;
         }
         match shortcuts.register(shortcut) {
-            Ok(()) => core.registered.push((shortcut, action)),
+            Ok(()) => {
+                eprintln!("[hotkey] 注册成功 {action:?} = {combo:?}");
+                core.registered.push((shortcut, action));
+            }
             // RegisterHotKey 失败 = 已被系统或其他程序注册（PRD §7.3）
             Err(err) => {
                 eprintln!("[hotkey] 注册 {action:?} = {combo:?} 失败：{err}");
@@ -117,6 +123,7 @@ pub fn apply_shortcuts(app: &AppHandle, core: &mut crate::state::Core) {
 
 /// 全局热键回调（插件 with_handler）。按住不放时系统会重复触发 Pressed，天然支持长按连续调速。
 pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutEvent) {
+    eprintln!("[hotkey] on_shortcut 触发 state={:?}", event.state());
     if event.state() != ShortcutState::Pressed {
         return;
     }
@@ -129,17 +136,27 @@ pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutEvent) {
         .find(|(s, _)| s == shortcut)
         .map(|(_, a)| *a)
     else {
+        eprintln!("[hotkey] 未匹配到已注册动作");
         return;
     };
+    eprintln!("[hotkey] 匹配动作 {action:?}");
 
+    let mut remembered = false;
     match action {
         ShortcutAction::SpeedUp => {
-            core.rate = clamp_rate(core.rate + core.step, core.slider_max);
+            let cap = hotkey_rate_cap(&core);
+            core.rate = clamp_rate(core.rate + core.settings.step, cap);
+            remembered = core.remember_rate();
         }
         ShortcutAction::SpeedDown => {
-            core.rate = clamp_rate(core.rate - core.step, core.slider_max);
+            let cap = hotkey_rate_cap(&core);
+            core.rate = clamp_rate(core.rate - core.settings.step, cap);
+            remembered = core.remember_rate();
         }
-        ShortcutAction::Reset => core.rate = 1.0,
+        ShortcutAction::Reset => {
+            core.rate = 1.0;
+            remembered = core.remember_rate();
+        }
         ShortcutAction::PlayPause => {}
         ShortcutAction::TogglePanel => {
             drop(core);
@@ -153,8 +170,12 @@ pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutEvent) {
         action,
         rate: core.rate,
         seq: core.osd_seq,
+        notice: high_speed_notice(&core),
     };
     drop(core);
+    if remembered {
+        crate::persist::save_memory_debounced(app);
+    }
 
     // 同步拍到此为止：主窗口/OSD 立即反馈目标值；下发到播放器走异步拍（见 router 顶部说明）
     let _ = app.emit("hotkey:triggered", payload.clone());
@@ -167,6 +188,29 @@ pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutEvent) {
         ShortcutAction::PlayPause => router::play_pause_async(app),
         ShortcutAction::TogglePanel => {}
     }
+}
+
+/// 当前热键的作用对象是否浏览器（含「焦点在别处但有已连接浏览器」的兜底场景）
+fn is_browser_target(core: &Core) -> bool {
+    core.current_rule()
+        .map(|r| r.kind == AppKind::Browser)
+        .unwrap_or(false)
+        || (core.current.is_none() && !core.connected_browsers.is_empty())
+}
+
+/// 浏览器内核上限 16×；滑块上限只约束控制页 UI，不该挡住全局热键打到网页视频。
+fn hotkey_rate_cap(core: &Core) -> f64 {
+    if is_browser_target(core) {
+        RATE_MAX
+    } else {
+        core.settings.slider_max
+    }
+}
+
+/// >4× 时 Chromium 不再做时间拉伸、音频静音（开发文档 §7.8），OSD 附带提示
+fn high_speed_notice(core: &Core) -> Option<String> {
+    (core.settings.high_speed_warning && core.rate > 4.0 && is_browser_target(core))
+        .then(|| "浏览器已静音".to_string())
 }
 
 fn toggle_main_window(app: &AppHandle) {

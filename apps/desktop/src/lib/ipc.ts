@@ -1,7 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AppInfo, AppRulePatch, MediaSession } from "../data";
-import type { ShortcutId } from "../store";
+import type { Settings, ShortcutId } from "../store";
 
 /** 浏览器预览（npm run dev）时所有 IPC 均为空操作，仅在 Tauri 环境生效 */
 
@@ -10,11 +10,12 @@ export type ShortcutConflicts = Partial<Record<ShortcutId, string>>;
 
 export interface CoreSnapshot {
   rate: number;
-  step: number;
-  sliderMax: number;
   hotkeysEnabled: boolean;
   shortcuts: Record<ShortcutId, string[]>;
   conflicts: ShortcutConflicts;
+  listening: boolean;
+  /** 设置页全部选项（Rust 权威，含持久化值） */
+  settings: Settings;
 }
 
 /** 全局热键触发事件（Rust `hotkey:triggered`） */
@@ -22,6 +23,8 @@ export interface HotkeyPayload {
   action: ShortcutId;
   rate: number;
   seq: number;
+  /** OSD 副文案（>4× 浏览器静音提示 / 智能降速说明） */
+  notice?: string | null;
 }
 
 export async function getCoreState(): Promise<CoreSnapshot | null> {
@@ -34,9 +37,9 @@ export function pushRate(rate: number) {
   if (isTauri()) void invoke("set_rate", { rate });
 }
 
-/** 步长 / 滑块上限变化时同步（热键步进依赖这两个值） */
-export function pushRateConfig(step: number, sliderMax: number) {
-  if (isTauri()) void invoke("sync_rate_config", { step, sliderMax });
+/** 设置页保存：推送完整设置对象（Rust 侧为权威并落盘） */
+export function pushSettings(settings: Settings) {
+  if (isTauri()) void invoke("save_settings", { settings });
 }
 
 export async function pushShortcuts(
@@ -103,4 +106,24 @@ export async function onAppsStatusChanged(
 ): Promise<UnlistenFn | null> {
   if (!isTauri()) return null;
   return listen<AppInfo[]>("apps:status-changed", (event) => handler(event.payload));
+}
+
+/* ── M4：自动更新 ── */
+
+export interface UpdateInfo {
+  version: string;
+}
+
+/** 检查到新版本（Rust `update:available`，启动后与每 24h 检查一次） */
+export async function onUpdateAvailable(
+  handler: (info: UpdateInfo) => void,
+): Promise<UnlistenFn | null> {
+  if (!isTauri()) return null;
+  return listen<UpdateInfo>("update:available", (event) => handler(event.payload));
+}
+
+/** 下载并安装更新，随后自动重启（设置页「更新并重启」） */
+export async function installUpdate(): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("install_update");
 }

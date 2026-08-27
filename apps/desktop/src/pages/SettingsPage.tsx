@@ -59,6 +59,9 @@ function PresetsEditor() {
 export function SettingsPage() {
   const settings = useAppStore((s) => s.settings);
   const update = useAppStore((s) => s.updateSettings);
+  const updateAvailable = useAppStore((s) => s.updateAvailable);
+  const updating = useAppStore((s) => s.updating);
+  const installUpdateNow = useAppStore((s) => s.installUpdateNow);
 
   return (
     <div>
@@ -128,7 +131,18 @@ export function SettingsPage() {
       </section>
 
       <footer className="mt-6 flex items-center justify-between border-t border-line pb-2 pt-4 text-[13px] text-mute">
-        <span>OmniSpeed 1.0.0</span>
+        <span className="flex items-center gap-3">
+          <span>OmniSpeed 0.1.0</span>
+          {updateAvailable && (
+            <button
+              onClick={() => void installUpdateNow()}
+              disabled={updating}
+              className="font-medium text-accent hover:underline disabled:cursor-default disabled:opacity-60"
+            >
+              {updating ? "正在更新…" : `发现新版本 v${updateAvailable} · 更新并重启`}
+            </button>
+          )}
+        </span>
         <span className="flex items-center gap-3">
           <a className="font-medium text-accent hover:underline" href="#license">
             开源许可

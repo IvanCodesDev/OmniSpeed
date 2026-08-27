@@ -69,11 +69,18 @@ export function OsdApp() {
         {payload.action === "playPause" ? (
           <span className="text-[21px] font-bold tracking-wide">暂停 / 继续</span>
         ) : (
-          <span className="flex items-baseline">
-            <span className="text-[34px] font-black leading-none tracking-tight">
-              {formatRate(payload.rate)}
+          <span className="flex flex-col">
+            <span className="flex items-baseline">
+              <span className="text-[34px] font-black leading-none tracking-tight">
+                {formatRate(payload.rate)}
+              </span>
+              <span className="ml-0.5 text-[21px] font-bold">×</span>
             </span>
-            <span className="ml-0.5 text-[21px] font-bold">×</span>
+            {payload.notice && (
+              <span className="mt-0.5 text-[11px] font-medium leading-none text-white/65">
+                {payload.notice}
+              </span>
+            )}
           </span>
         )}
       </div>

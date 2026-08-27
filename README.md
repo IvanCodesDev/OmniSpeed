@@ -14,7 +14,7 @@
 </div>
 
 > [!NOTE]
-> 项目处于早期开发阶段，尚未发布可用版本。当前已完成桌面应用界面、系统托盘、全局快捷键、屏幕悬浮提示（OSD）与桌面播放器适配（mpv / VLC / PotPlayer / MPC-HC，IPC 优先、按键兜底）；浏览器倍速控制（扩展）正在开发中（见[开发进度](#开发进度)）。
+> 项目处于早期开发阶段，尚未发布可用版本。当前已完成桌面应用界面、系统托盘、全局快捷键、屏幕悬浮提示（OSD）、桌面播放器适配（mpv / VLC / PotPlayer / MPC-HC，IPC 优先、按键兜底），以及浏览器扩展（Native Messaging + Rate-Guard 倍速锁定，0.25×–16×）。按应用记忆与安装包见[开发进度](#开发进度)。
 
 ## OmniSpeed 是什么
 
@@ -77,8 +77,19 @@
 npm install          # 安装依赖（npm workspaces）
 npm run dev          # 仅前端：Vite 开发服务器，浏览器预览界面
 npm run tauri dev    # 桌面应用：编译 Rust 并启动窗口
-npm run tauri build  # 打包安装包
+npm run tauri build  # 打包 NSIS 安装包（按当前用户安装，免管理员）
 ```
+
+打包与发布说明：
+
+- 安装包启用了自动更新产物（`createUpdaterArtifacts`），构建前需配置更新签名私钥：
+  `tauri signer generate -w <路径> --password <密码>` 生成密钥对，公钥写入
+  `tauri.conf.json`（已配置）；构建时设置环境变量 `TAURI_SIGNING_PRIVATE_KEY`
+  （私钥文件内容）与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。私钥请勿入库。
+- 自动更新清单指向 GitHub Releases（`latest.json`），发布时把 `tauri build` 产出的
+  安装包与 `*.sig`、`latest.json` 一并上传到 Release。
+- 正式分发需要 Windows 代码签名（Authenticode）：全局键盘钩子 + 模拟输入易被杀软
+  误报（开发文档 §7.6），拿到证书后在 `bundle.windows.signCommand` 接入签名命令。
 
 ## 开发进度
 
@@ -87,8 +98,9 @@ npm run tauri build  # 打包安装包
 | M0 | 桌面应用骨架、四页界面、系统托盘 | 已完成 |
 | M1 | 全局快捷键、冲突检测、屏幕悬浮提示 | 已完成 |
 | M2 | 桌面播放器适配（控制接口 + 模拟按键） | 已完成 |
-| M3 | 浏览器扩展、倍速锁定、主流站点适配 | 下一步 |
-| M4 | 按应用记忆、签名安装包、开机自启、自动更新 | 计划中 |
+| M3 | 浏览器扩展、倍速锁定、主流站点适配 | 已完成（B 站 / 抖音 / YouTube 首批适配；其余站点通用 HTML5） |
+| M3.5 | 更多站点规则、Firefox NM、站点级锁定设置 | 下一步 |
+| M4 | 按应用/网站记忆、设置项落地、安装包、开机自启、自动更新 | 已完成（代码签名待证书） |
 
 ## 项目结构
 

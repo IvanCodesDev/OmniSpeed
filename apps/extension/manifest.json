@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "OmniSpeed Connector",
+  "version": "0.1.0",
+  "description": "OmniSpeed 桌面应用的浏览器伴侣：全局快捷键统一调速、突破站点倍速上限（0.25×–16×）、倍速锁定防复位。",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsPZWv8gIWuD2pVD9at5f3V/RYSKzOKyAwMLbavizf1y9vbCw8btwW2aZJTMI8HPrx4Xv0RQRDw0gVuJ5tcMj7yFiP77TL9rpEepgg59QYJyKgmuF/DJGTSoxbltJzCYh6MRDJghCCwIPjyWUvS5nbBMIUzHd5TZN+ee5J4ICNPfJlGHJbVR+5sBz9KzJ3L/oTLxy2P7PrOO38tn/lSe08vtNElV3V9DFsjg3SB/VEY1qgBobLVCPbgLXewDjX1ApCCOKWxYucNOWNeXkBBL83BsCTJiAsSvSDFb2t8GLVw6AVTI6hL7KtG2Gg7kQMd8uWfgKlQE20AeGljvVNLbu+QIDAQAB",
+  "minimum_chrome_version": "116",
+  "permissions": ["nativeMessaging", "tabs", "storage", "alarms"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["rate-guard.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "icons": {
+    "128": "icons/128.png"
+  }
+}
