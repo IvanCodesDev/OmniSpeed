@@ -1,7 +1,9 @@
-//! M1 核心状态：当前倍速、步长与全局快捷键配置。
-//! 倍速的权威值保存在 Rust 侧（热键在主窗口隐藏时也要工作）；
-//! M2 起由 router/adapters 负责把倍速真正下发到目标应用。
+//! 核心状态：当前倍速、步长、全局快捷键配置（M1），
+//! 以及应用规则表与前台接管对象（M2）。
+//! 倍速的权威值保存在 Rust 侧（热键在主窗口隐藏时也要工作），
+//! 由 router/adapters 负责把倍速真正下发到目标应用。
 
+use crate::rules::{AppKind, AppRule, AppStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -47,8 +49,16 @@ pub fn default_shortcuts() -> ShortcutMap {
     ])
 }
 
+/// 前台匹配到的接管对象（monitor 写入，router 据此选择适配器）
+#[derive(Debug, Clone)]
+pub struct CurrentTarget {
+    pub rule_id: String,
+    pub hwnd: isize,
+    pub process_name: String,
+}
+
 pub struct Core {
-    /// 当前目标倍速（M1 为应用内状态，M2 起下发到适配器）
+    /// 当前目标倍速（下发到适配器的依据；适配器可回读时以回读值校正）
     pub rate: f64,
     /// 快捷键步长（由前端设置页同步）
     pub step: f64,
@@ -62,6 +72,12 @@ pub struct Core {
     pub registered: Vec<(Shortcut, ShortcutAction)>,
     /// OSD 显示代数：防止旧的延时隐藏任务盖掉新一次提示
     pub osd_seq: u64,
+    /// 全局监听开关（控制页右上角）：关闭时不跟随前台切换、不下发控制
+    pub listening: bool,
+    /// 应用规则表（内置 + 用户覆盖/自定义）
+    pub rules: Vec<AppRule>,
+    /// 当前前台匹配到的接管对象
+    pub current: Option<CurrentTarget>,
 }
 
 impl Default for Core {
@@ -75,6 +91,9 @@ impl Default for Core {
             conflicts: HashMap::new(),
             registered: Vec::new(),
             osd_seq: 0,
+            listening: true,
+            rules: crate::rules::built_in_rules(),
+            current: None,
         }
     }
 }
@@ -88,7 +107,33 @@ impl Core {
             hotkeys_enabled: self.hotkeys_enabled,
             shortcuts: self.shortcuts.clone(),
             conflicts: self.conflicts.clone(),
+            listening: self.listening,
         }
+    }
+
+    /// 当前接管对象对应的规则
+    pub fn current_rule(&self) -> Option<&AppRule> {
+        let target = self.current.as_ref()?;
+        self.rules.iter().find(|r| r.id == target.rule_id)
+    }
+
+    /// 组装控制页「当前媒体」会话（事件 media:changed / 命令 get_current_media 共用）。
+    /// 监听暂停时对外表现为无媒体。rate 字段由调用方按适配器回读能力填充。
+    pub fn current_session(&self, rate: Option<f64>) -> Option<MediaSession> {
+        if !self.listening {
+            return None;
+        }
+        let target = self.current.as_ref()?;
+        let rule = self.current_rule()?;
+        Some(MediaSession {
+            app_id: rule.id.clone(),
+            name: rule.name.clone(),
+            source: target.process_name.clone(),
+            kind: rule.kind,
+            status: rule.status(),
+            rate,
+            can_read_back: rate.is_some(),
+        })
     }
 }
 
@@ -104,6 +149,21 @@ pub struct CoreSnapshot {
     pub hotkeys_enabled: bool,
     pub shortcuts: ShortcutMap,
     pub conflicts: HashMap<ShortcutAction, String>,
+    pub listening: bool,
+}
+
+/// 控制页「当前媒体」会话 DTO（契约见前端 lib/ipc.ts MediaSession）
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaSession {
+    pub app_id: String,
+    pub name: String,
+    pub source: String,
+    pub kind: AppKind,
+    pub status: AppStatus,
+    /// 适配器可回读时为真实倍速，否则 null（前端显示目标倍速）
+    pub rate: Option<f64>,
+    pub can_read_back: bool,
 }
 
 /// 倍速统一收口：夹到 [0.25, min(max, 16)] 并保留两位小数（与前端 clampRate 一致）

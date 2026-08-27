@@ -1,0 +1,24 @@
+# platform-win —— 项目所有 unsafe Win32 调用集中于此（开发文档 §5.1 platform/win 层）
+[package]
+name = "platform-win"
+version = "0.1.0"
+description = "OmniSpeed 的 Win32 平台封装层：前台监听 / 模拟按键 / 窗口消息"
+edition = "2021"
+publish = false
+
+[lib]
+name = "platform_win"
+
+[dependencies]
+thiserror = "2"
+
+# 官方 Win32 绑定，按需启用 feature 控制编译面（开发文档 §4.4）
+[dependencies.windows]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+]

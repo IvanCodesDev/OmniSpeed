@@ -19,3 +19,8 @@ tauri-plugin-store = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["time"] }
+# 进程枚举：应用页「运行中」检测 + 前台进程识别兜底（开发文档 §4.4）
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+# 项目内可复用库（开发文档 §10）：unsafe Win32 封装 / 播放器控制通道
+platform-win = { path = "../../../crates/platform-win" }
+player-ipc = { path = "../../../crates/player-ipc" }

@@ -1,10 +1,14 @@
 //! OmniSpeed Rust 核心（M1：托盘 + 全局快捷键 + 冲突检测 + OSD）。
 //! 后续模块规划见开发文档 §5.1：router / monitor / adapters / nm_bridge / platform。
 
+mod adapters;
 mod commands;
 mod hotkey;
+mod monitor;
 mod osd;
 mod persist;
+mod router;
+mod rules;
 mod state;
 
 use state::{Core, CoreState};
@@ -71,16 +75,28 @@ pub fn run() {
             commands::sync_rate_config,
             commands::save_shortcuts,
             commands::set_hotkeys_enabled,
+            commands::list_apps,
+            commands::save_app_rule,
+            commands::get_current_media,
+            commands::set_listening,
+            commands::apply_to_current,
         ])
         .setup(|app| {
             setup_tray(app)?;
             osd::create_window(app.handle())?;
 
-            // 读取持久化的快捷键配置并注册全局热键（冲突记录在 state 中，前端拉取后行内标红）
-            let state = app.state::<CoreState>();
-            let mut core = state.lock().expect("core state poisoned");
-            persist::load(app.handle(), &mut core);
-            hotkey::apply_shortcuts(app.handle(), &mut core);
+            // 读取持久化的快捷键/规则配置并注册全局热键（冲突记录在 state 中，前端拉取后行内标红）
+            {
+                let state = app.state::<CoreState>();
+                let mut core = state.lock().expect("core state poisoned");
+                persist::load(app.handle(), &mut core);
+                hotkey::apply_shortcuts(app.handle(), &mut core);
+            }
+
+            // 前台窗口监听：把前台进程映射到应用规则，驱动「当前媒体」（开发文档 §7.1）
+            if let Err(err) = monitor::start(app.handle()) {
+                eprintln!("[monitor] 前台监听启动失败：{err}");
+            }
 
             Ok(())
         })

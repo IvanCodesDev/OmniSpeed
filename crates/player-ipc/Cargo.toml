@@ -1,0 +1,16 @@
+[package]
+name = "player-ipc"
+version = "0.1.0"
+description = "OmniSpeed 播放器控制通道客户端：mpv JSON-IPC、VLC HTTP、PotPlayer/MPC-HC 窗口消息码常量表（开发文档 §7.3）"
+authors = ["OmniSpeed contributors"]
+edition = "2021"
+
+[lib]
+name = "player_ipc"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# VLC HTTP 接口只走本机回环的明文 HTTP，关闭默认特性以剔除 TLS/gzip 依赖栈（依赖精简）
+ureq = { version = "2", default-features = false }

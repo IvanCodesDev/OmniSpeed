@@ -1,8 +1,23 @@
 import { create } from "zustand";
 import {
+  managedApps,
+  methodText,
+  previewMedia,
+  type AppInfo,
+  type AppRulePatch,
+  type MediaSession,
+} from "./data";
+import {
+  applyToCurrent,
   getCoreState,
+  getCurrentMedia,
+  listApps,
+  onAppsStatusChanged,
   onHotkeyTriggered,
+  onMediaChanged,
+  pushAppRule,
   pushHotkeysEnabled,
+  pushListening,
   pushRate,
   pushRateConfig,
   pushShortcuts,
@@ -76,28 +91,33 @@ interface AppStore {
   listening: boolean;
   hotkeysEnabled: boolean;
   rate: number;
+  /** 当前被接管的媒体（Rust get_current_media / media:changed；浏览器预览回退 mock） */
+  currentMedia: MediaSession | null;
+  /** 应用适配列表（Rust list_apps / apps:status-changed；浏览器预览回退 mock） */
+  apps: AppInfo[];
   selectedAppId: string;
   settings: Settings;
   siteRules: SiteRule[];
   shortcuts: Record<ShortcutId, string[]>;
   /** 快捷键注册冲突（Rust 侧 RegisterHotKey 失败反馈，快捷键页行内标红） */
   conflicts: ShortcutConflicts;
-  /** 已在「应用页」保存过规则的应用（保存后状态显示为「已适配」） */
-  ruleSavedIds: string[];
   setPage: (page: Page) => void;
   toggleListening: () => void;
   setHotkeysEnabled: (enabled: boolean) => void;
   setRate: (rate: number) => void;
   applyRate: (rate: number) => void;
   stepRate: (dir: 1 | -1) => void;
+  /** 「应用到当前媒体」：把当前倍速强制下发（PRD §7.1），以 Rust 返回的实际生效值为准 */
+  applyToCurrentMedia: () => Promise<void>;
   setSelectedApp: (id: string) => void;
+  /** 保存应用规则并用 Rust 返回的完整列表刷新（浏览器预览本地模拟） */
+  saveAppRule: (patch: AppRulePatch) => Promise<void>;
   updateSettings: (patch: Partial<Settings>) => void;
   updateSiteRule: (host: string, patch: Partial<SiteRule>) => void;
   setShortcut: (id: ShortcutId, combo: string[]) => void;
   resetShortcuts: () => void;
   /** 保存并注册全部快捷键；返回是否全部注册成功 */
   saveShortcuts: () => Promise<boolean>;
-  markRuleSaved: (id: string) => void;
 }
 
 const clampRate = (rate: number, max: number) =>
@@ -111,6 +131,9 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   listening: true,
   hotkeysEnabled: true,
   rate: 1,
+  // initCoreSync 拉取真实数据（浏览器预览回退 mock），初值为空避免 Tauri 下闪现占位数据
+  currentMedia: null,
+  apps: [],
   selectedAppId: "unknown",
   settings: {
     defaultRate: 1,
@@ -128,9 +151,13 @@ export const useAppStore = create<AppStore>()((set, get) => ({
   siteRules: defaultSiteRules,
   shortcuts: { ...defaultShortcuts },
   conflicts: {},
-  ruleSavedIds: [],
   setPage: (page) => set({ page }),
-  toggleListening: () => set((s) => ({ listening: !s.listening })),
+  toggleListening: () => {
+    const listening = !get().listening;
+    set({ listening });
+    // 同步 Rust 侧暂停 / 恢复全局监听
+    pushListening(listening);
+  },
   setHotkeysEnabled: (hotkeysEnabled) => {
     set({ hotkeysEnabled });
     // 开启时 Rust 立即注册并返回最新冲突表；关闭时注销全部热键
@@ -157,7 +184,33 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     pushRate(next);
     set({ rate: next });
   },
+  applyToCurrentMedia: async () => {
+    const actual = await applyToCurrent(get().rate);
+    if (actual !== null) set({ rate: actual });
+  },
   setSelectedApp: (selectedAppId) => set({ selectedAppId }),
+  saveAppRule: async (patch) => {
+    const apps = await pushAppRule(patch);
+    if (apps) {
+      set({ apps });
+      return;
+    }
+    // 浏览器预览：本地模拟 Rust 侧保存行为（保存后状态即「已适配」，PRD §7.2）
+    set((s) => ({
+      apps: s.apps.map((a) =>
+        a.id === patch.id
+          ? {
+              ...a,
+              method: patch.method,
+              methodLabel: methodText[patch.method],
+              keys: patch.keys,
+              ipcConfig: patch.ipcConfig,
+              status: a.status === "connected" ? a.status : "adapted",
+            }
+          : a,
+      ),
+    }));
+  },
   updateSettings: (patch) => {
     const s = get();
     const settings = { ...s.settings, ...patch };
@@ -178,8 +231,6 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     set({ conflicts });
     return Object.keys(conflicts).length === 0;
   },
-  markRuleSaved: (id) =>
-    set((s) => (s.ruleSavedIds.includes(id) ? s : { ruleSavedIds: [...s.ruleSavedIds, id] })),
 }));
 
 /** 倍速显示格式：2 → "2.0"，1.25 → "1.25" */
@@ -187,28 +238,41 @@ export const formatRate = (rate: number) =>
   Number.isInteger(rate * 10) ? rate.toFixed(1) : rate.toFixed(2);
 
 /**
- * 主窗口启动时与 Rust 核心同步（浏览器预览时为空操作）：
- * 1. 拉取权威状态（倍速、快捷键、总开关、注册冲突）；
+ * 主窗口启动时与 Rust 核心同步（浏览器预览时回退占位数据）：
+ * 1. 拉取权威状态（倍速、快捷键、总开关、注册冲突）与 M2 状态（当前媒体、应用列表）；
  * 2. 把前端持有的步长/滑块上限推给 Rust（热键步进依赖）；
- * 3. 订阅全局热键事件，实时刷新倍速显示。
+ * 3. 订阅全局热键 / 前台媒体 / 应用状态事件，实时刷新。
  */
 export async function initCoreSync() {
-  const snap = await getCoreState();
+  const [snap, media, apps] = await Promise.all([getCoreState(), getCurrentMedia(), listApps()]);
   if (snap) {
     useAppStore.setState({
-      rate: snap.rate,
+      // 当前媒体可回读真实倍速时以它为准（优先于 Rust 侧记忆的全局倍速）
+      rate: media?.rate ?? snap.rate,
       hotkeysEnabled: snap.hotkeysEnabled,
       shortcuts: snap.shortcuts,
       conflicts: snap.conflicts,
+      currentMedia: media,
+      apps: apps ?? [],
     });
     const { step, sliderMax } = useAppStore.getState().settings;
     pushRateConfig(step, sliderMax);
+  } else {
+    // 纯浏览器预览（npm run dev）：无 Rust 后端，应用列表与当前媒体回退到占位数据
+    useAppStore.setState({ apps: managedApps, currentMedia: previewMedia });
   }
   void onHotkeyTriggered((payload) => {
     if (payload.action === "speedUp" || payload.action === "speedDown" || payload.action === "reset") {
       useAppStore.setState({ rate: payload.rate });
     }
   });
+  void onMediaChanged((media) => {
+    // 接管对象带真实倍速时同步 store（当前媒体的真实倍速优先）
+    useAppStore.setState(
+      media?.rate != null ? { currentMedia: media, rate: media.rate } : { currentMedia: media },
+    );
+  });
+  void onAppsStatusChanged((apps) => useAppStore.setState({ apps }));
 }
 
 // 调试辅助：?page=… 直达指定页面（截图回归 / 深链用），

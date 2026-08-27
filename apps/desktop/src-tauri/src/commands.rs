@@ -1,9 +1,13 @@
 //! Tauri 命令：前端 ↔ 核心状态（接口清单见开发文档 §9）。
 
-use crate::state::{clamp_rate, CoreSnapshot, CoreState, ShortcutAction, ShortcutMap, RATE_MAX, RATE_MIN};
+use crate::rules::{running_processes, to_app_info, AppInfo, AppRulePatch};
+use crate::state::{
+    clamp_rate, Core, CoreSnapshot, CoreState, MediaSession, ShortcutAction, ShortcutMap,
+    RATE_MAX, RATE_MIN,
+};
 use crate::{hotkey, persist};
 use std::collections::HashMap;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 /// 前端启动时一次性拉取核心状态
 #[tauri::command]
@@ -57,4 +61,89 @@ pub fn set_hotkeys_enabled(
     hotkey::apply_shortcuts(&app, &mut core);
     persist::save(&app, &core)?;
     Ok(core.conflicts.clone())
+}
+
+// ---------- M2：应用规则与当前媒体 ----------
+
+fn apps_snapshot(core: &Core) -> Vec<AppInfo> {
+    // 先扫进程再组装，进程扫描（数十毫秒）不放在持锁热路径里由调用方保证
+    let running = running_processes();
+    core.rules.iter().map(|r| to_app_info(r, &running)).collect()
+}
+
+/// 应用页列表：内置 + 用户规则，附运行状态
+#[tauri::command]
+pub fn list_apps(state: State<CoreState>) -> Vec<AppInfo> {
+    let core = state.lock().expect("core state poisoned");
+    apps_snapshot(&core)
+}
+
+/// 保存应用规则（应用页右侧编辑器）。内置规则只允许改控制方式/按键/IPC 参数，
+/// 未知 id 视为自定义规则整条新增（PRD US-4：给未知播放器绑定按键）。
+/// 返回更新后的完整列表，并向所有窗口广播 apps:status-changed。
+#[tauri::command]
+pub fn save_app_rule(
+    app: AppHandle,
+    state: State<CoreState>,
+    rule: AppRulePatch,
+) -> Result<Vec<AppInfo>, String> {
+    let mut core = state.lock().expect("core state poisoned");
+    if let Some(existing) = core.rules.iter_mut().find(|r| r.id == rule.id) {
+        existing.method = rule.method;
+        existing.keys = rule.keys;
+        existing.ipc_config = rule.ipc_config;
+        if !existing.builtin {
+            existing.name = rule.name;
+            existing.process = rule.process.to_lowercase();
+        }
+    } else {
+        core.rules.push(crate::rules::AppRule {
+            id: rule.id,
+            name: rule.name,
+            process: rule.process.to_lowercase(),
+            aliases: Vec::new(),
+            kind: crate::rules::AppKind::Unknown,
+            method: rule.method,
+            // 自定义规则 M2 只支持按键通道（IPC 类型选择随内置规则走）
+            ipc: crate::rules::IpcKind::None,
+            ipc_config: rule.ipc_config,
+            keys: rule.keys,
+            builtin: false,
+        });
+    }
+    persist::save(&app, &core)?;
+    let infos = apps_snapshot(&core);
+    drop(core);
+    let _ = app.emit("apps:status-changed", &infos);
+    Ok(infos)
+}
+
+/// 控制页「当前媒体」。倍速回读在 router 集成后填充（可回读的适配器以真实值为准）
+#[tauri::command]
+pub fn get_current_media(state: State<CoreState>) -> Option<MediaSession> {
+    let core = state.lock().expect("core state poisoned");
+    core.current_session(None)
+}
+
+/// 暂停/恢复全局监听（控制页右上角）。暂停时对外表现为无媒体
+#[tauri::command]
+pub fn set_listening(app: AppHandle, state: State<CoreState>, enabled: bool) {
+    let mut core = state.lock().expect("core state poisoned");
+    core.listening = enabled;
+    let session = core.current_session(None);
+    drop(core);
+    let _ = app.emit("media:changed", &session);
+}
+
+/// 「应用到当前媒体」：把选定倍速下发到当前接管对象；返回目标倍速
+/// （下发是异步的，可回读通道的真实值随后经 media:changed 校正）
+#[tauri::command]
+pub fn apply_to_current(app: AppHandle, state: State<CoreState>, rate: f64) -> Result<f64, String> {
+    let target = {
+        let mut core = state.lock().expect("core state poisoned");
+        core.rate = clamp_rate(rate, RATE_MAX);
+        core.rate
+    };
+    crate::router::push_rate_async(&app, crate::router::PushMode::ExactOnly);
+    Ok(target)
 }

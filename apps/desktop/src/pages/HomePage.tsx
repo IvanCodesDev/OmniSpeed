@@ -1,8 +1,8 @@
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { BadgeCheck, ChevronRight, MonitorPlay, TriangleAlert } from "lucide-react";
 import { AppIcon } from "../components/AppIcon";
-import { currentMedia, recentMedia } from "../data";
+import { brandOf, recentMedia, type AppStatus, type MediaSession } from "../data";
 import { cn } from "../lib/cn";
 import { makeSliderScale } from "../lib/sliderScale";
 import { formatRate, MAX_RATE, SLIDER_MIN, useAppStore } from "../store";
@@ -22,11 +22,18 @@ function ListeningPill() {
   );
 }
 
-/** 当前媒体卡片（监听暂停时显示空态引导） */
-function MediaCard({ hasMedia }: { hasMedia: boolean }) {
+/** 接管状态徽章（PRD §7.1：已接管 / 已适配 / 需要设置 三态，颜色区分） */
+const mediaBadge: Record<AppStatus, { label: string; cls: string; icon: ReactNode }> = {
+  connected: { label: "已接管", cls: "bg-emerald-500/10 text-emerald-600", icon: <BadgeCheck size={13} /> },
+  adapted: { label: "已适配", cls: "bg-accent-soft text-accent", icon: <BadgeCheck size={13} /> },
+  "needs-setup": { label: "需要设置", cls: "bg-amber-400/15 text-amber-600", icon: <TriangleAlert size={13} /> },
+};
+
+/** 当前媒体卡片（无接管对象或监听暂停时显示空态引导） */
+function MediaCard({ media }: { media: MediaSession | null }) {
   const setPage = useAppStore((s) => s.setPage);
 
-  if (!hasMedia) {
+  if (!media) {
     return (
       <div className="flat-card flex w-[248px] shrink-0 flex-col items-center justify-center gap-2 rounded-[28px] p-6 text-center">
         <MonitorPlay size={40} strokeWidth={1.3} className="text-mute" />
@@ -42,17 +49,18 @@ function MediaCard({ hasMedia }: { hasMedia: boolean }) {
     );
   }
 
+  const badge = mediaBadge[media.status];
   return (
     <div className="relative w-[248px] shrink-0">
       {/* 叠放的卡片层：用灰底 + 实色边框在浅色画布上拉开层次 */}
       <span className="absolute -left-3 -top-3 h-full w-full rotate-[-5deg] rounded-[28px] border border-line bg-card-2" />
       <span className="absolute -left-1.5 -top-1.5 h-full w-full rotate-[-2.5deg] rounded-[28px] border border-line bg-[#fafafb]" />
       <div className="flat-card relative flex h-full flex-col items-center justify-center gap-1 rounded-[28px] p-6 text-center">
-        <AppIcon id={currentMedia.icon} size={80} className="drop-shadow-[0_5px_8px_rgba(0,0,0,0.1)]" />
-        <div className="mt-4 text-[19px] font-bold">{currentMedia.name}</div>
-        <div className="text-[13px] text-mute">{currentMedia.source}</div>
-        <span className="mt-2.5 inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-600">
-          <BadgeCheck size={13} /> 已接管
+        <AppIcon id={brandOf(media.appId, media.source)} size={80} className="drop-shadow-[0_5px_8px_rgba(0,0,0,0.1)]" />
+        <div className="mt-4 text-[19px] font-bold">{media.name}</div>
+        <div className="text-[13px] text-mute">{media.source}</div>
+        <span className={cn("mt-2.5 inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium", badge.cls)}>
+          {badge.icon} {badge.label}
         </span>
       </div>
     </div>
@@ -60,16 +68,21 @@ function MediaCard({ hasMedia }: { hasMedia: boolean }) {
 }
 
 export function HomePage() {
+  // 大倍速显示直接用 store.rate：初始拉取与 media:changed 已用当前媒体的真实倍速覆盖它
   const rate = useAppStore((s) => s.rate);
   const setRate = useAppStore((s) => s.setRate);
   const applyRate = useAppStore((s) => s.applyRate);
+  const applyToCurrentMedia = useAppStore((s) => s.applyToCurrentMedia);
   const listening = useAppStore((s) => s.listening);
+  const currentMedia = useAppStore((s) => s.currentMedia);
   const update = useAppStore((s) => s.updateSettings);
   const { sliderMax, presets, highSpeedWarning } = useAppStore((s) => s.settings);
 
   const scale = useMemo(() => makeSliderScale(sliderMax), [sliderMax]);
   const t = scale.rateToT(rate);
-  const hasMedia = listening;
+  // 监听暂停时视为无接管对象（空态 + 控件禁用）
+  const media = listening ? currentMedia : null;
+  const hasMedia = media !== null;
 
   return (
     <div>
@@ -80,7 +93,7 @@ export function HomePage() {
 
       {/* 遥控器主区：直接落在画布上，不再套一层背景盒子（上边距为叠卡层留出探出空间） */}
       <section className="mt-11 flex items-stretch gap-9">
-        <MediaCard hasMedia={hasMedia} />
+        <MediaCard media={media} />
 
         {/* 调速控制区 */}
         <div
@@ -179,6 +192,7 @@ export function HomePage() {
 
           <button
             disabled={!hasMedia}
+            onClick={() => void applyToCurrentMedia()}
             className="mt-1.5 h-[52px] w-full rounded-full bg-accent text-[15px] font-semibold text-on-accent transition-transform active:scale-[0.98]"
           >
             应用到当前媒体
@@ -186,7 +200,7 @@ export function HomePage() {
         </div>
       </section>
 
-      {/* 最近媒体（点击恢复其上次倍速，PRD §7.1） */}
+      {/* 最近媒体（点击恢复其上次倍速，PRD §7.1）；真实历史数据 M4 接入，当前为占位展示 */}
       <section className="mt-9">
         <h2 className="mb-3 text-[15px] font-semibold">最近媒体</h2>
         <div className="flat-card overflow-hidden rounded-xl">

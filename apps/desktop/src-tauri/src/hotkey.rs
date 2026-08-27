@@ -2,6 +2,7 @@
 //! 冲突检测策略：RegisterHotKey 注册失败即判定被系统或其他程序占用。
 
 use crate::osd;
+use crate::router::{self, PushMode};
 use crate::state::{clamp_rate, CoreState, ShortcutAction};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -139,7 +140,6 @@ pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutEvent) {
             core.rate = clamp_rate(core.rate - core.step, core.slider_max);
         }
         ShortcutAction::Reset => core.rate = 1.0,
-        // M2：经 router 下发到当前适配器；M1 仅 OSD 反馈
         ShortcutAction::PlayPause => {}
         ShortcutAction::TogglePanel => {
             drop(core);
@@ -156,9 +156,17 @@ pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutEvent) {
     };
     drop(core);
 
-    // 主窗口据此刷新倍速显示，OSD 窗口据此更新内容
+    // 同步拍到此为止：主窗口/OSD 立即反馈目标值；下发到播放器走异步拍（见 router 顶部说明）
     let _ = app.emit("hotkey:triggered", payload.clone());
     osd::show(app, &payload);
+
+    match action {
+        ShortcutAction::SpeedUp => router::push_rate_async(app, PushMode::Step { dir: 1 }),
+        ShortcutAction::SpeedDown => router::push_rate_async(app, PushMode::Step { dir: -1 }),
+        ShortcutAction::Reset => router::push_rate_async(app, PushMode::Reset),
+        ShortcutAction::PlayPause => router::play_pause_async(app),
+        ShortcutAction::TogglePanel => {}
+    }
 }
 
 fn toggle_main_window(app: &AppHandle) {
