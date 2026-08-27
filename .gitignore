@@ -1,0 +1,27 @@
+# Node
+node_modules/
+dist/
+*.local
+npm-debug.log*
+
+# Rust / Tauri
+target/
+apps/desktop/src-tauri/gen/schemas/
+.cargo/
+
+# 内部文档，不对外发布（另有 .githooks/pre-commit 兜底拦截）
+docs/
+
+# 本地 Agent / 编辑器工具配置，与项目无关且可能含密钥
+.cursor/
+.codex/
+
+# Editor / OS
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+.DS_Store
+Thumbs.db
+.shots/

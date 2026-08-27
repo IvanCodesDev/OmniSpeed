@@ -1,0 +1,9 @@
+# 全局 core.autocrlf=true 会把 CRLF 写入工作区，导致 shell 脚本的 shebang
+# 变成 "#!/bin/sh\r" 而无法执行。钩子与脚本必须锁定 LF。
+.githooks/** text eol=lf
+*.sh text eol=lf
+
+# 二进制素材不做换行转换，也不参与 diff
+*.png binary
+*.ico binary
+*.icns binary

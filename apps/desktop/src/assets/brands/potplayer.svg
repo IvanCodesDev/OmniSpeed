@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <defs>
+    <linearGradient id="pot-body" x1="12" y1="6" x2="36" y2="44" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffd52e"/>
+      <stop offset="1" stop-color="#f9b800"/>
+    </linearGradient>
+  </defs>
+  <circle cx="24" cy="24" r="20.5" fill="url(#pot-body)"/>
+  <circle cx="24" cy="24" r="20.5" fill="none" stroke="#e8a800" stroke-width="1.4" opacity=".55"/>
+  <path d="M20 16.6 32 24l-12 7.4Z" fill="#fff" stroke="#fff" stroke-width="3.2" stroke-linejoin="round"/>
+</svg>

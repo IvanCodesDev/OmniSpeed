@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <defs>
+    <linearGradient id="edge-base" x1="8" y1="40" x2="42" y2="10" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0c59a4"/>
+      <stop offset="1" stop-color="#1272d4"/>
+    </linearGradient>
+    <linearGradient id="edge-wave" x1="10" y1="34" x2="42" y2="14" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#29a7e8"/>
+      <stop offset="1" stop-color="#3ad1ff"/>
+    </linearGradient>
+    <linearGradient id="edge-top" x1="14" y1="8" x2="42" y2="20" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#41e0c8"/>
+      <stop offset="1" stop-color="#4bb5f2"/>
+    </linearGradient>
+  </defs>
+  <circle cx="24" cy="24" r="22" fill="url(#edge-base)"/>
+  <path fill="url(#edge-wave)" d="M45.9 22c-.9 8.5-6.4 15.7-14 18.9 7-4.2 9.2-11.5 6.7-17-2.7-6-8.9-9.7-15.9-9.7-8 0-13.9 4.6-16.2 10.9C7.7 13.6 15 6.6 24.4 6.6 35.6 6.6 44.7 13 45.9 22Z"/>
+  <path fill="url(#edge-top)" opacity=".92" d="M43.4 16.3C40.1 9.4 32.9 4.7 24.6 4.7c-9.8 0-16.4 6.3-17.8 14.6 3.3-5.6 10-9.2 17.8-9.2 8.2 0 15.7 2.4 18.8 6.2Z"/>
+  <text x="24.6" y="32.8" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="25" font-weight="700" fill="#fff">e</text>
+</svg>

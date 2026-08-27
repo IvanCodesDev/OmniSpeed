@@ -1,2 +1,110 @@
-# VideoSpeedControllar
-Control HTML5 video speed on any website from 0.1x to 20x. Features a modern UI with number input, slider, and Alt+S toggle. Remembers your speed and resists site overrides. Perfect for learning, binge-watching, or debugging.
+<div align="center">
+  <img src="./Img/omnispeed-logo.png" width="112" alt="OmniSpeed" />
+  <h1>OmniSpeed</h1>
+  <p><strong>Global video speed controller — not just a browser extension, but a desktop app that speeds up any player, up to 16×.</strong></p>
+  <p><strong>全局倍速播放器 —— 不只是浏览器插件，而是桌面应用，浏览器与本地播放器都能倍速，最高 16 倍速。</strong></p>
+  <p>
+    <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4?logo=windows&logoColor=white" alt="Platform: Windows 10/11" />
+    <img src="https://img.shields.io/badge/playback%20speed-up%20to%2016x-2E7BF6" alt="Playback speed up to 16x" />
+    <img src="https://img.shields.io/badge/built%20with-Tauri%202-24C8DB?logo=tauri&logoColor=white" alt="Built with Tauri 2" />
+    <img src="https://img.shields.io/badge/core-Rust-CE422B?logo=rust&logoColor=white" alt="Core: Rust" />
+    <img src="https://img.shields.io/badge/status-early%20development-F5A623" alt="Status: early development" />
+    <img src="https://img.shields.io/badge/license-TBD-9CA3AF" alt="License: TBD" />
+  </p>
+</div>
+
+> [!NOTE]
+> 项目处于早期开发阶段，尚未发布可用版本。当前已完成桌面应用界面与系统托盘，倍速控制能力正在开发中（见[开发进度](#开发进度)）。
+
+## OmniSpeed 是什么
+
+与只能作用于单个浏览器的倍速插件不同，OmniSpeed 是一款常驻系统托盘的**桌面应用**：一套全局快捷键同时控制 Chrome / Edge / Firefox 里的网页视频和 VLC / PotPlayer / mpv 等本地播放器，倍速范围 0.25×–16×，并对哔哩哔哩、抖音、YouTube 等主流平台做了防复位适配。完全本地运行、零数据外传、开源可审计。
+
+## 为什么不用浏览器插件
+
+| | 浏览器倍速插件 | OmniSpeed |
+| --- | --- | --- |
+| 生效范围 | 装了插件的那一个浏览器 | 浏览器 + 桌面播放器，全局统一 |
+| 换个软件 | 失效，得重新找方案 | 同一套快捷键继续用 |
+| 倍速上限 | 受站点 UI 限制，通常 2×／3× | 直接控制播放内核，最高 16× |
+| 切集／拖进度 | 常被站点脚本复位回 1× | 倍速锁定，持续保持目标倍速 |
+| 多软件切换 | 各记各的 | 按应用／网站记忆，切回自动恢复 |
+
+## 功能
+
+- **全局快捷键**：任意软件在前台时，`Ctrl+Alt+↑/↓` 都能调速，屏幕悬浮提示当前倍速。
+- **突破平台上限**：平台菜单最高 2×／3× 只是 UI 限制，OmniSpeed 直接控制浏览器播放内核，可用 0.25×–16× 的任意倍速。
+- **倍速锁定**：拦截站点在切集、切 P、拖进度、自动连播时对倍速的复位；你在播放器上主动调速则会被尊重并同步。
+- **短视频流跟随**：抖音、快手、YouTube Shorts 滑到下一条时自动继承当前倍速。
+- **桌面播放器适配**：mpv、VLC、PotPlayer 优先走控制接口，一步设到精确倍速、无需窗口在前台；其余播放器用模拟快捷键兜底。
+- **按应用记忆**：记住每个应用／网站上次用的倍速，切回去自动恢复。
+- **直播与广告识别**：直播流禁用倍速并提示，平台广告时段不干预，正片恢复。
+- **本地优先**：不联网、不采集浏览内容，所需系统权限均可在设置中关闭。
+
+## 支持范围
+
+| 类别 | 支持对象 |
+| --- | --- |
+| 浏览器 | Chrome、Edge、Firefox（最新两个大版本） |
+| 视频平台 | 哔哩哔哩、抖音、YouTube、腾讯视频、爱奇艺、优酷、西瓜视频、快手；其余站点走通用 HTML5 适配 |
+| 桌面播放器 | VLC、PotPlayer、MPC-HC、mpv、KMPlayer，以及可自定义规则的其他软件 |
+| 操作系统 | Windows 10/11 (x64) 首发；基于 Tauri 2 构建，macOS / Linux 已在架构层预留 |
+
+## 能力边界
+
+有些事从软件外部做不到，这里说明白，避免误解：
+
+- **无法让任意封闭软件的画面加速**。视频的解码与渲染发生在目标软件进程内部，外部无权干预。OmniSpeed 的做法是"统一遥控器"——对浏览器精确设速，对播放器走控制接口或模拟它自己的快捷键，而不是劫持任意像素。
+- **超过约 4× 后浏览器会静音**。这是浏览器内核的预期行为（不再做音频时间拉伸），OmniSpeed 会明确提示并提供一键回到 4×。
+- **高倍速吃带宽**。5× 播放需要约 5× 的实时带宽，弱网下可能追着缓冲卡顿，可开启智能降速自动回落。
+- **不绕过任何付费、DRM 与防作弊校验**。部分网课平台会校验播放进度，高倍速可能不被平台承认。
+
+## 安装
+
+尚未发布正式版本。可按下方步骤从源码构建，或关注 Releases 获取后续版本。
+
+## 从源码构建
+
+前置要求：
+
+- Node.js ≥ 20（含 npm）
+- Rust stable 工具链
+- Windows：WebView2 运行时（Windows 11 自带）
+
+在仓库根目录执行：
+
+```bash
+npm install          # 安装依赖（npm workspaces）
+npm run dev          # 仅前端：Vite 开发服务器，浏览器预览界面
+npm run tauri dev    # 桌面应用：编译 Rust 并启动窗口
+npm run tauri build  # 打包安装包
+```
+
+## 开发进度
+
+| 阶段 | 内容 | 状态 |
+| --- | --- | --- |
+| M0 | 桌面应用骨架、四页界面、系统托盘 | 已完成 |
+| M1 | 全局快捷键、冲突检测、屏幕悬浮提示 | 下一步 |
+| M2 | 桌面播放器适配（控制接口 + 模拟按键） | 计划中 |
+| M3 | 浏览器扩展、倍速锁定、主流站点适配 | 计划中 |
+| M4 | 按应用记忆、签名安装包、开机自启、自动更新 | 计划中 |
+
+## 项目结构
+
+```
+OmniSpeed/
+├─ apps/
+│  ├─ desktop/            # Tauri 桌面应用（React + TypeScript 前端 / Rust 核心）
+│  └─ extension/          # 浏览器扩展 MV3
+├─ crates/                # 可复用 Rust 库
+└─ Img/                   # 品牌素材
+```
+
+## 参与贡献
+
+欢迎提交播放器与站点的适配规则、问题反馈与改进建议。站点适配采用声明式规则，新增一个平台通常只需要补一份规则文件。
+
+## 许可
+
+开源许可待定（MIT / Apache-2.0）。

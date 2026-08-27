@@ -1,0 +1,122 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-rail: var(--rail);
+  --color-card: var(--card);
+  --color-card-2: var(--card-2);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-mute: var(--mute);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-on-accent: var(--on-accent);
+  --color-accent-soft: var(--accent-soft);
+  --font-app: "Segoe UI Variable Text", "Segoe UI", system-ui, "Microsoft YaHei UI",
+    "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
+}
+
+/* ---------- 主题（浅色，唯一） ---------- */
+:root {
+  --canvas: #fbfbfb;
+  --rail: #f1f1f3;
+  --card: #ffffff;
+  --card-2: #f4f4f6;
+  --ink: #17191d;
+  --ink-2: #4b5058;
+  --mute: #8f949c;
+  --line: #ececee;
+  --accent: #2e7bf6;
+  --on-accent: #ffffff;
+  --accent-soft: #eef4fe;
+
+  --slider-track: #e6e7ea;
+  --slider-thumb: var(--accent);
+  --slider-thumb-ring: #ffffff;
+}
+
+/* ---------- 自定义工具类 ---------- */
+/* 扁平卡片：白底 + 发丝边框，不悬浮 */
+@utility flat-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+
+/* ---------- 基础 ---------- */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-app);
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+  user-select: none;
+  cursor: default;
+}
+
+input,
+textarea {
+  user-select: text;
+}
+
+button {
+  cursor: pointer;
+}
+
+/* ---------- 速度滑块 ---------- */
+.speed-slider {
+  appearance: none;
+  -webkit-appearance: none;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--slider-track);
+  outline: none;
+}
+.speed-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--slider-thumb);
+  border: 3px solid var(--slider-thumb-ring);
+  box-shadow: 0 1px 4px rgba(20, 24, 30, 0.25);
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+.speed-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.1);
+}
+.speed-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--slider-thumb);
+  border: 3px solid var(--slider-thumb-ring);
+  box-shadow: 0 1px 4px rgba(20, 24, 30, 0.25);
+  cursor: pointer;
+}
+
+/* ---------- 滚动条 ---------- */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--mute) 32%, transparent);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--mute) 50%, transparent);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

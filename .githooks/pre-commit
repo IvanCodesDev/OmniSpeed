@@ -1,0 +1,47 @@
+#!/bin/sh
+#
+# OmniSpeed 项目级提交守卫，强制两条硬性要求：
+#   1. docs/ 及其下所有文件不得进入任何提交
+#   2. 提交者必须是 IvanCodesDev
+#
+# 本文件是受版本控制的权威副本。它需要被 git 实际加载才会生效，二选一：
+#   a) 复制到本地钩子目录（当前仓库已这样安装，无需改动 git config）：
+#        cp .githooks/pre-commit .git/hooks/pre-commit
+#   b) 让克隆后自动生效（会写入仓库级 git config）：
+#        git config core.hooksPath .githooks
+
+REQUIRED_USER="IvanCodesDev"
+FORBIDDEN_PATH="docs/"
+failed=0
+
+# --- 1) 禁止提交 docs/ ---
+staged_docs=$(git diff --cached --name-only --diff-filter=ACMR | grep "^${FORBIDDEN_PATH}")
+if [ -n "$staged_docs" ]; then
+  echo "[BLOCKED] ${FORBIDDEN_PATH} 被列为不可提交内容，但以下文件已暂存：" >&2
+  echo "$staged_docs" | sed 's/^/            /' >&2
+  echo "          取消暂存：git restore --staged ${FORBIDDEN_PATH}" >&2
+  failed=1
+fi
+
+# --- 2) 提交者必须是 IvanCodesDev ---
+# git var 会把 GIT_AUTHOR_NAME 环境变量、-c user.name 与配置文件一并解析，
+# 因此这里拿到的就是本次提交真正会写入的作者。
+ident=$(git var GIT_AUTHOR_IDENT 2>/dev/null)
+if [ -z "$ident" ]; then
+  echo "[BLOCKED] 未配置提交身份，无法确认提交者" >&2
+  failed=1
+else
+  author_name=${ident%% <*}
+  if [ "$author_name" != "$REQUIRED_USER" ]; then
+    echo "[BLOCKED] 提交者必须是 ${REQUIRED_USER}，当前为 \"${author_name}\"" >&2
+    failed=1
+  fi
+fi
+
+if [ "$failed" -ne 0 ]; then
+  echo "" >&2
+  echo "提交已被 .githooks/pre-commit 拦截。" >&2
+  exit 1
+fi
+
+exit 0

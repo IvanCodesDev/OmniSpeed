@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <defs>
+    <clipPath id="vlc-cone">
+      <path d="M24 4.2c-1.9 0-3.2 1.2-3.6 3L13.6 34h20.8L27.6 7.2c-.4-1.8-1.7-3-3.6-3Z"/>
+    </clipPath>
+  </defs>
+  <ellipse cx="24" cy="37.6" rx="14.6" ry="4.4" fill="#e57200"/>
+  <ellipse cx="24" cy="36.4" rx="14.6" ry="4.4" fill="#ff8c1a"/>
+  <path fill="#ff8c1a" d="M24 4.2c-1.9 0-3.2 1.2-3.6 3L13.6 34h20.8L27.6 7.2c-.4-1.8-1.7-3-3.6-3Z"/>
+  <g clip-path="url(#vlc-cone)">
+    <rect x="10" y="11.6" width="28" height="5.6" fill="#fff"/>
+    <rect x="10" y="22.4" width="28" height="6.2" fill="#fff"/>
+  </g>
+</svg>
