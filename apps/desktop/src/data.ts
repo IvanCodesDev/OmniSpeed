@@ -67,8 +67,5 @@ export const shortcutItems: ShortcutItem[] = [
   { id: "togglePanel", label: "显示控制面板", kind: "panel" },
 ];
 
-/** 常见系统快捷键黑名单（M0 静态模拟；M1 由 RegisterHotKey 失败反馈驱动） */
-export const systemConflicts = new Set(["Ctrl+Alt+S"]);
-
 /** 设置页「预设档位」可选值 */
 export const presetCandidates = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 16];

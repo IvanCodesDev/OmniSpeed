@@ -101,6 +101,34 @@ button {
   cursor: pointer;
 }
 
+/* ---------- 全局 OSD 悬浮胶囊（独立透明窗口） ---------- */
+.osd-pill {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 26px 13px 16px;
+  border-radius: 999px;
+  background: rgba(23, 26, 31, 0.88);
+  color: #fff;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  animation: osd-pop 0.16s ease-out;
+  transition: opacity 0.35s ease, transform 0.35s ease;
+}
+.osd-pill-fading {
+  opacity: 0;
+  transform: scale(0.95);
+}
+@keyframes osd-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.88);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 /* ---------- 滚动条 ---------- */
 ::-webkit-scrollbar {
   width: 10px;

@@ -1,4 +1,13 @@
 import { create } from "zustand";
+import {
+  getCoreState,
+  onHotkeyTriggered,
+  pushHotkeysEnabled,
+  pushRate,
+  pushRateConfig,
+  pushShortcuts,
+  type ShortcutConflicts,
+} from "./lib/ipc";
 
 export type Page = "home" | "apps" | "shortcuts" | "settings";
 export type StepSize = 0.1 | 0.25 | 0.5;
@@ -71,6 +80,8 @@ interface AppStore {
   settings: Settings;
   siteRules: SiteRule[];
   shortcuts: Record<ShortcutId, string[]>;
+  /** 快捷键注册冲突（Rust 侧 RegisterHotKey 失败反馈，快捷键页行内标红） */
+  conflicts: ShortcutConflicts;
   /** 已在「应用页」保存过规则的应用（保存后状态显示为「已适配」） */
   ruleSavedIds: string[];
   setPage: (page: Page) => void;
@@ -84,6 +95,8 @@ interface AppStore {
   updateSiteRule: (host: string, patch: Partial<SiteRule>) => void;
   setShortcut: (id: ShortcutId, combo: string[]) => void;
   resetShortcuts: () => void;
+  /** 保存并注册全部快捷键；返回是否全部注册成功 */
+  saveShortcuts: () => Promise<boolean>;
   markRuleSaved: (id: string) => void;
 }
 
@@ -93,11 +106,11 @@ const clampRate = (rate: number, max: number) =>
 /** 能容纳该倍速的最小显示上限档 */
 const ceilingFor = (rate: number) => SLIDER_MAX_OPTIONS.find((m) => m >= rate) ?? MAX_RATE;
 
-export const useAppStore = create<AppStore>()((set) => ({
+export const useAppStore = create<AppStore>()((set, get) => ({
   page: "home",
   listening: true,
   hotkeysEnabled: true,
-  rate: 2,
+  rate: 1,
   selectedAppId: "unknown",
   settings: {
     defaultRate: 1,
@@ -114,39 +127,57 @@ export const useAppStore = create<AppStore>()((set) => ({
   },
   siteRules: defaultSiteRules,
   shortcuts: { ...defaultShortcuts },
+  conflicts: {},
   ruleSavedIds: [],
   setPage: (page) => set({ page }),
   toggleListening: () => set((s) => ({ listening: !s.listening })),
-  setHotkeysEnabled: (hotkeysEnabled) => set({ hotkeysEnabled }),
-  setRate: (rate) => set((s) => ({ rate: clampRate(rate, s.settings.sliderMax) })),
+  setHotkeysEnabled: (hotkeysEnabled) => {
+    set({ hotkeysEnabled });
+    // 开启时 Rust 立即注册并返回最新冲突表；关闭时注销全部热键
+    void pushHotkeysEnabled(hotkeysEnabled).then((conflicts) => set({ conflicts }));
+  },
+  setRate: (rate) => {
+    const next = clampRate(rate, get().settings.sliderMax);
+    pushRate(next);
+    set({ rate: next });
+  },
   // 预设档位 / 最近媒体是「明确指定某个倍速」的意图，不该被显示上限静默夹掉，
   // 超出时把上限抬到能容纳它的档（滑块拖动与快捷键步进仍受上限约束）
-  applyRate: (rate) =>
-    set((s) => {
-      const target = clampRate(rate, MAX_RATE);
-      return {
-        rate: target,
-        settings: {
-          ...s.settings,
-          sliderMax: Math.max(s.settings.sliderMax, ceilingFor(target)),
-        },
-      };
-    }),
-  stepRate: (dir) =>
-    set((s) => ({ rate: clampRate(s.rate + dir * s.settings.step, s.settings.sliderMax) })),
+  applyRate: (rate) => {
+    const s = get();
+    const target = clampRate(rate, MAX_RATE);
+    const sliderMax = Math.max(s.settings.sliderMax, ceilingFor(target));
+    if (sliderMax !== s.settings.sliderMax) pushRateConfig(s.settings.step, sliderMax);
+    pushRate(target);
+    set({ rate: target, settings: { ...s.settings, sliderMax } });
+  },
+  stepRate: (dir) => {
+    const s = get();
+    const next = clampRate(s.rate + dir * s.settings.step, s.settings.sliderMax);
+    pushRate(next);
+    set({ rate: next });
+  },
   setSelectedApp: (selectedAppId) => set({ selectedAppId }),
-  updateSettings: (patch) =>
-    set((s) => {
-      const settings = { ...s.settings, ...patch };
-      // 调低上限时同步收拢当前倍速
-      return { settings, rate: clampRate(s.rate, settings.sliderMax) };
-    }),
+  updateSettings: (patch) => {
+    const s = get();
+    const settings = { ...s.settings, ...patch };
+    if (settings.step !== s.settings.step || settings.sliderMax !== s.settings.sliderMax) {
+      pushRateConfig(settings.step, settings.sliderMax);
+    }
+    // 调低上限时同步收拢当前倍速（Rust 侧 sync_rate_config 做同样的收口）
+    set({ settings, rate: clampRate(s.rate, settings.sliderMax) });
+  },
   updateSiteRule: (host, patch) =>
     set((s) => ({
       siteRules: s.siteRules.map((r) => (r.host === host ? { ...r, ...patch } : r)),
     })),
   setShortcut: (id, combo) => set((s) => ({ shortcuts: { ...s.shortcuts, [id]: combo } })),
   resetShortcuts: () => set({ shortcuts: { ...defaultShortcuts } }),
+  saveShortcuts: async () => {
+    const conflicts = await pushShortcuts(get().shortcuts);
+    set({ conflicts });
+    return Object.keys(conflicts).length === 0;
+  },
   markRuleSaved: (id) =>
     set((s) => (s.ruleSavedIds.includes(id) ? s : { ruleSavedIds: [...s.ruleSavedIds, id] })),
 }));
@@ -154,6 +185,31 @@ export const useAppStore = create<AppStore>()((set) => ({
 /** 倍速显示格式：2 → "2.0"，1.25 → "1.25" */
 export const formatRate = (rate: number) =>
   Number.isInteger(rate * 10) ? rate.toFixed(1) : rate.toFixed(2);
+
+/**
+ * 主窗口启动时与 Rust 核心同步（浏览器预览时为空操作）：
+ * 1. 拉取权威状态（倍速、快捷键、总开关、注册冲突）；
+ * 2. 把前端持有的步长/滑块上限推给 Rust（热键步进依赖）；
+ * 3. 订阅全局热键事件，实时刷新倍速显示。
+ */
+export async function initCoreSync() {
+  const snap = await getCoreState();
+  if (snap) {
+    useAppStore.setState({
+      rate: snap.rate,
+      hotkeysEnabled: snap.hotkeysEnabled,
+      shortcuts: snap.shortcuts,
+      conflicts: snap.conflicts,
+    });
+    const { step, sliderMax } = useAppStore.getState().settings;
+    pushRateConfig(step, sliderMax);
+  }
+  void onHotkeyTriggered((payload) => {
+    if (payload.action === "speedUp" || payload.action === "speedDown" || payload.action === "reset") {
+      useAppStore.setState({ rate: payload.rate });
+    }
+  });
+}
 
 // 调试辅助：?page=… 直达指定页面（截图回归 / 深链用），
 // 在模块加载阶段生效，避免首帧渲染后再切换。

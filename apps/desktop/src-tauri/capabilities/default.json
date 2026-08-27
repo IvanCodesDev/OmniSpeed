@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "OmniSpeed 主窗口默认能力：自定义标题栏所需的窗口控制权限",
-  "windows": ["main"],
+  "description": "主窗口与 OSD 窗口默认能力：IPC 命令/事件 + 自定义标题栏所需的窗口控制权限",
+  "windows": ["main", "osd"],
   "permissions": [
     "core:default",
     "core:window:allow-minimize",

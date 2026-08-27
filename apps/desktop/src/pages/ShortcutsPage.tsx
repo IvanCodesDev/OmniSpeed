@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { ArrowDown, ArrowUp, Keyboard, Pencil, SkipForward, TriangleAlert } from "lucide-react";
 import keycaps from "../assets/clay/keycaps.png";
 import { Toggle } from "../components/Toggle";
-import { shortcutItems, systemConflicts, type ShortcutItem } from "../data";
+import { shortcutItems, type ShortcutItem } from "../data";
 import { cn } from "../lib/cn";
 import { useAppStore, type ShortcutId } from "../store";
 
@@ -140,17 +140,23 @@ export function ShortcutsPage() {
   const setShortcut = useAppStore((s) => s.setShortcut);
   const resetShortcuts = useAppStore((s) => s.resetShortcuts);
 
+  const conflicts = useAppStore((s) => s.conflicts);
+  const saveShortcuts = useAppStore((s) => s.saveShortcuts);
+
   const [recordingId, setRecordingId] = useState<ShortcutId | null>(null);
   const [justSaved, setJustSaved] = useState(false);
   const saveTimer = useRef<number>(undefined);
   useEffect(() => () => window.clearTimeout(saveTimer.current), []);
 
-  /** 冲突信息：系统快捷键占用 / 与其他条目重复（M0 静态模拟，M1 接入注册失败反馈） */
+  /**
+   * 冲突信息：条目间重复在录制后即时提示；
+   * 系统/其他程序占用来自 Rust 侧注册结果（保存后刷新）
+   */
   const conflictOf = (id: ShortcutId): string | null => {
     const key = shortcuts[id].join("+");
-    if (systemConflicts.has(key)) return "与系统快捷键冲突";
     const dup = shortcutItems.find((it) => it.id !== id && shortcuts[it.id].join("+") === key);
-    return dup ? `与「${dup.label}」重复` : null;
+    if (dup) return `与「${dup.label}」重复`;
+    return conflicts[id] ?? null;
   };
 
   const recordingItem = shortcutItems.find((it) => it.id === recordingId);
@@ -227,9 +233,11 @@ export function ShortcutsPage() {
           </button>
           <button
             onClick={() => {
-              setJustSaved(true);
-              window.clearTimeout(saveTimer.current);
-              saveTimer.current = window.setTimeout(() => setJustSaved(false), 1500);
+              void saveShortcuts().then(() => {
+                setJustSaved(true);
+                window.clearTimeout(saveTimer.current);
+                saveTimer.current = window.setTimeout(() => setJustSaved(false), 1500);
+              });
             }}
             className={cn(
               "h-10 rounded-xl px-6 text-sm font-semibold transition-all active:scale-[0.98]",

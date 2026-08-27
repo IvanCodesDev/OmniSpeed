@@ -1,14 +1,22 @@
-//! OmniSpeed Rust 核心（M0 骨架：窗口 + 系统托盘）。
-//! 后续模块规划见开发文档 §5.1：router / monitor / adapters / hotkey / nm_bridge / osd / store / platform。
+//! OmniSpeed Rust 核心（M1：托盘 + 全局快捷键 + 冲突检测 + OSD）。
+//! 后续模块规划见开发文档 §5.1：router / monitor / adapters / nm_bridge / platform。
 
+mod commands;
+mod hotkey;
+mod osd;
+mod persist;
+mod state;
+
+use state::{Core, CoreState};
+use std::sync::Mutex;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, WindowEvent,
 };
 
-/// 显示并聚焦主窗口（从托盘唤起）
-fn show_main_window(app: &AppHandle) {
+/// 显示并聚焦主窗口（托盘唤起 / 全局快捷键唤起）
+pub(crate) fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
@@ -50,8 +58,30 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(hotkey::on_shortcut)
+                .build(),
+        )
+        .manage::<CoreState>(Mutex::new(Core::default()))
+        .invoke_handler(tauri::generate_handler![
+            commands::get_core_state,
+            commands::set_rate,
+            commands::sync_rate_config,
+            commands::save_shortcuts,
+            commands::set_hotkeys_enabled,
+        ])
         .setup(|app| {
             setup_tray(app)?;
+            osd::create_window(app.handle())?;
+
+            // 读取持久化的快捷键配置并注册全局热键（冲突记录在 state 中，前端拉取后行内标红）
+            let state = app.state::<CoreState>();
+            let mut core = state.lock().expect("core state poisoned");
+            persist::load(app.handle(), &mut core);
+            hotkey::apply_shortcuts(app.handle(), &mut core);
+
             Ok(())
         })
         .on_window_event(|window, event| {
