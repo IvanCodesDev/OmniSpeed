@@ -1,6 +1,7 @@
 # Node
 node_modules/
 dist/
+dist-firefox/
 *.local
 npm-debug.log*
 
@@ -11,6 +12,7 @@ apps/desktop/src-tauri/gen/schemas/
 
 # 内部文档，不对外发布（另有 .githooks/pre-commit 兜底拦截）
 docs/
+会话-*.md
 
 # 本地 Agent / 编辑器工具配置，与项目无关且可能含密钥
 .cursor/

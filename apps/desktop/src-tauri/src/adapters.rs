@@ -212,7 +212,8 @@ impl Adapter {
 /// PotPlayer 速度回读：0 通常意味着窗口未处理该消息（如 hwnd 已失效）
 fn pot_read_speed(hwnd: isize) -> Option<f64> {
     let raw = platform_win::send_message(hwnd, WM_USER, potplayer::POT_GET_SPEED, 0);
-    (raw >= potplayer::POT_SPEED_MIN && raw <= potplayer::POT_SPEED_MAX)
+    (potplayer::POT_SPEED_MIN..=potplayer::POT_SPEED_MAX)
+        .contains(&raw)
         .then(|| potplayer::speed_from_lresult(raw))
 }
 

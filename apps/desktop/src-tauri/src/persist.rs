@@ -3,7 +3,10 @@
 //! M4 增加设置页全部选项与按应用/网站的倍速记忆（开发文档 §8 / §11）。
 
 use crate::rules::{merge_saved, AppRule};
-use crate::state::{clamp_rate, default_shortcuts, Core, CoreState, Settings, ShortcutMap};
+use crate::state::{
+    clamp_rate, default_shortcuts, merge_saved_site_rules, Core, CoreState, Settings, ShortcutMap,
+    SiteRule,
+};
 use serde_json::json;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -47,6 +50,13 @@ pub fn load(app: &AppHandle, core: &mut Core) {
     }
     core.settings.normalize();
 
+    if let Some(value) = store.get("siteRules") {
+        if let Ok(saved) = serde_json::from_value::<Vec<SiteRule>>(value) {
+            // 内置 8 站以代码为准，存量覆盖可编辑字段 / 追加自定义站点（M3.5）
+            merge_saved_site_rules(&mut core.site_rules, saved);
+        }
+    }
+
     if let Some(value) = store.get("memory") {
         if let Ok(saved) = serde_json::from_value::<HashMap<String, f64>>(value) {
             core.memory = saved
@@ -67,6 +77,7 @@ pub fn save(app: &AppHandle, core: &Core) -> Result<(), String> {
     store.set("hotkeysEnabled", core.hotkeys_enabled);
     store.set("appRules", json!(core.rules));
     store.set("settings", json!(core.settings));
+    store.set("siteRules", json!(core.site_rules));
     store.set("memory", json!(core.memory));
     store.save().map_err(|e| e.to_string())
 }

@@ -26,8 +26,23 @@ export interface MediaState {
   adPlaying: boolean;
   /** 缓冲前沿余量（秒），高倍速警示用；未知为 null（开发文档 §7.8） */
   bufferedAhead: number | null;
-  /** 命中的站点适配器 id："generic" | "bilibili" | "douyin" | "youtube" */
+  /** 命中的站点适配器 id（sites/types.ts 注释列出全集），未命中为 "generic" */
   adapter: string;
+}
+
+/**
+ * 站点级规则（M3.5，「应用页 · 网站适配」）：host 为规则键，
+ * 对 location.host 做后缀匹配（"bilibili.com" 命中 "www.bilibili.com"）。
+ * 未命中任何规则的站点等价于 { rateLock: true, follow: true, maxRate: 全局值 }。
+ */
+export interface SiteRuleConfig {
+  host: string;
+  /** 站点倍速上限（与全局 maxRate 取小） */
+  maxRate: number;
+  /** 站点级倍速锁定开关（与全局 rateLock 相与） */
+  rateLock: boolean;
+  /** 短视频流/新出现媒体是否跟随会话目标倍速 */
+  follow: boolean;
 }
 
 /** 桌面核心下发的运行配置（SW 缓存并广播给所有内容脚本） */
@@ -43,6 +58,11 @@ export interface RateConfig {
   maxRate: number;
   /** 变速不变调（HTMLMediaElement.preservesPitch） */
   preservesPitch: boolean;
+  /**
+   * 站点级规则表（M3.5）。内容脚本按自身 host 取命中项，与全局值合成生效配置；
+   * 旧版核心不下发该字段 → undefined 视为空表（全部站点用全局配置）。
+   */
+  siteRules?: SiteRuleConfig[];
 }
 
 // ---------- 内容脚本 → Service Worker ----------

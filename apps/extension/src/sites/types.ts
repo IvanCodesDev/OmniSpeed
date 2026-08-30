@@ -4,7 +4,11 @@
  * 倍速锁定、短视频流跟随、SPA 导航恢复等由 content.ts / rate-guard.ts 通用机制承担。
  */
 export interface SiteAdapter {
-  /** 上报用 id（协议 MediaState.adapter）："generic" | "bilibili" | "douyin" | "youtube" */
+  /**
+   * 上报用 id（协议 MediaState.adapter）：
+   * "generic" | "bilibili" | "douyin" | "youtube" | "qq" | "iqiyi" | "youku"
+   * | "ixigua" | "kuaishou"
+   */
   id: string;
   /** 对 location.host 匹配 */
   match: RegExp;

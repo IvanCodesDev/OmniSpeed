@@ -78,6 +78,98 @@ impl Settings {
     }
 }
 
+/// 站点级规则（M3.5，「应用页 · 网站适配」；开发文档 §8 siteRules / §9 命令）。
+/// serde 名与前端 store.ts 的 SiteRule 一一对应，host 为规则键（对 location.host 后缀匹配）。
+/// rateLock / maxRate / follow 经 nm_bridge 下发扩展生效；defaultRate 用于进站恢复。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SiteRule {
+    pub host: String,
+    pub name: String,
+    /// 进入该站且无按站记忆时的恢复倍速；None = 跟随全局（不主动改写）
+    pub default_rate: Option<f64>,
+    /// 站点倍速上限（扩展侧与全局上限取小）
+    pub max_rate: f64,
+    /// 站点级倍速锁定（扩展侧与全局锁定相与）
+    pub rate_lock: bool,
+    /// 短视频流/新出现媒体是否跟随会话倍速
+    pub follow: bool,
+}
+
+impl Default for SiteRule {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            name: String::new(),
+            default_rate: None,
+            max_rate: RATE_MAX,
+            rate_lock: true,
+            follow: true,
+        }
+    }
+}
+
+impl SiteRule {
+    /// 收口非法值（同 Settings::normalize，防御手改的持久化文件）
+    pub fn normalize(&mut self) {
+        self.host = self.host.trim().to_lowercase();
+        self.max_rate = if self.max_rate.is_finite() {
+            self.max_rate.clamp(RATE_MIN, RATE_MAX)
+        } else {
+            RATE_MAX
+        };
+        self.default_rate =
+            self.default_rate.filter(|r| r.is_finite()).map(|r| clamp_rate(r, self.max_rate));
+    }
+}
+
+/// 内置站点规则：与扩展 sites/ 注册表的 v1.0 首发 8 站一一对应。
+/// 长视频平台（腾讯/爱奇艺/优酷）默认关闭「新片跟随」：连播下一集回到常速更符合预期
+pub fn default_site_rules() -> Vec<SiteRule> {
+    let rule = |host: &str, name: &str, follow: bool| SiteRule {
+        host: host.into(),
+        name: name.into(),
+        follow,
+        ..SiteRule::default()
+    };
+    vec![
+        rule("bilibili.com", "哔哩哔哩", true),
+        rule("douyin.com", "抖音", true),
+        rule("youtube.com", "YouTube", true),
+        rule("v.qq.com", "腾讯视频", false),
+        rule("iqiyi.com", "爱奇艺", false),
+        rule("youku.com", "优酷", false),
+        rule("ixigua.com", "西瓜视频", true),
+        rule("kuaishou.com", "快手", true),
+    ]
+}
+
+/// host 后缀匹配："bilibili.com" 命中 "www.bilibili.com"，不误伤 "xbilibili.com"
+pub fn host_matches(host: &str, rule_host: &str) -> bool {
+    host == rule_host
+        || (host.len() > rule_host.len()
+            && host.ends_with(rule_host)
+            && host.as_bytes()[host.len() - rule_host.len() - 1] == b'.')
+}
+
+/// 持久化合并：内置表以代码为准，存量覆盖可编辑字段；未知 host 追加为自定义规则
+pub fn merge_saved_site_rules(rules: &mut Vec<SiteRule>, saved: Vec<SiteRule>) {
+    for mut s in saved {
+        s.normalize();
+        if s.host.is_empty() {
+            continue;
+        }
+        if let Some(existing) = rules.iter_mut().find(|r| r.host == s.host) {
+            existing.default_rate = s.default_rate;
+            existing.max_rate = s.max_rate;
+            existing.rate_lock = s.rate_lock;
+            existing.follow = s.follow;
+        } else {
+            rules.push(s);
+        }
+    }
+}
+
 /// 快捷键动作，serde 名称与前端 `ShortcutId` 一一对应
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -145,6 +237,8 @@ pub struct Core {
     pub connected_browsers: HashSet<String>,
     /// 各浏览器活动标签页的媒体状态（NM 桥写入，键同上）
     pub browser_media: HashMap<String, BrowserMedia>,
+    /// 站点级规则（M3.5）：内置 8 站 + 用户自定义，持久化于 config.json
+    pub site_rules: Vec<SiteRule>,
     /// 按应用/网站记忆的倍速（开发文档 §7.5）：桌面软件按进程名、网页按 host
     pub memory: HashMap<String, f64>,
     /// 记忆变更代数：防抖持久化用（见 persist::save_memory_debounced）
@@ -185,6 +279,7 @@ impl Default for Core {
             current: None,
             connected_browsers: HashSet::new(),
             browser_media: HashMap::new(),
+            site_rules: default_site_rules(),
             memory: HashMap::new(),
             memory_seq: 0,
             slowdown_at: None,
@@ -208,6 +303,11 @@ impl Core {
     pub fn current_rule(&self) -> Option<&AppRule> {
         let target = self.current.as_ref()?;
         self.rules.iter().find(|r| r.id == target.rule_id)
+    }
+
+    /// host 命中的站点规则（后缀匹配，M3.5）
+    pub fn site_rule_for(&self, host: &str) -> Option<&SiteRule> {
+        self.site_rules.iter().find(|r| host_matches(host, &r.host))
     }
 
     /// 记忆键（开发文档 §7.5）：网页按活动标签页的 host 细分，桌面软件按进程名。
@@ -388,6 +488,53 @@ mod tests {
             },
         );
         assert_eq!(core.memory_key().as_deref(), Some("bilibili.com"));
+    }
+
+    #[test]
+    fn host_matches_is_suffix_only_at_label_boundary() {
+        assert!(host_matches("bilibili.com", "bilibili.com"));
+        assert!(host_matches("www.bilibili.com", "bilibili.com"));
+        assert!(host_matches("live.bilibili.com", "bilibili.com"));
+        assert!(!host_matches("xbilibili.com", "bilibili.com"));
+        assert!(!host_matches("bilibili.com.evil.com", "bilibili.com"));
+        assert!(host_matches("v.qq.com", "v.qq.com"));
+        assert!(!host_matches("weixin.qq.com", "v.qq.com"));
+    }
+
+    #[test]
+    fn merge_saved_site_rules_overrides_builtin_and_appends_custom() {
+        let mut rules = default_site_rules();
+        merge_saved_site_rules(
+            &mut rules,
+            vec![
+                SiteRule {
+                    host: "Bilibili.com ".into(), // 手改大小写/空白也能对上内置项
+                    name: "改名不生效".into(),
+                    default_rate: Some(2.0),
+                    max_rate: 99.0, // 越界收口到 16
+                    rate_lock: false,
+                    follow: false,
+                },
+                SiteRule { host: "example.com".into(), name: "自定义".into(), ..SiteRule::default() },
+                SiteRule { host: "  ".into(), ..SiteRule::default() }, // 空 host 丢弃
+            ],
+        );
+        let b = rules.iter().find(|r| r.host == "bilibili.com").unwrap();
+        assert_eq!(b.name, "哔哩哔哩"); // 内置名以代码为准
+        assert_eq!(b.default_rate, Some(2.0));
+        assert_eq!(b.max_rate, 16.0);
+        assert!(!b.rate_lock);
+        assert!(!b.follow);
+        assert_eq!(rules.len(), default_site_rules().len() + 1);
+        assert!(rules.iter().any(|r| r.host == "example.com"));
+    }
+
+    #[test]
+    fn site_rule_for_matches_current_host() {
+        let core = Core::default();
+        assert_eq!(core.site_rule_for("www.iqiyi.com").map(|r| r.host.as_str()), Some("iqiyi.com"));
+        assert_eq!(core.site_rule_for("v.qq.com").map(|r| r.host.as_str()), Some("v.qq.com"));
+        assert!(core.site_rule_for("example.org").is_none());
     }
 
     #[test]

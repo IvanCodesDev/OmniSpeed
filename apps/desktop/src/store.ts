@@ -13,6 +13,7 @@ import {
   getCurrentMedia,
   installUpdate,
   listApps,
+  listSiteRules,
   onAppsStatusChanged,
   onHotkeyTriggered,
   onMediaChanged,
@@ -23,6 +24,7 @@ import {
   pushRate,
   pushSettings,
   pushShortcuts,
+  pushSiteRule,
   type ShortcutConflicts,
 } from "./lib/ipc";
 
@@ -54,7 +56,7 @@ export interface Settings {
   autoUpdate: boolean;
 }
 
-/** 站点适配规则（PRD §7.2 / §7.6，M3 接入扩展后由 Rust 侧持久化） */
+/** 站点适配规则（PRD §7.2 / §7.6；M3.5 起 Rust 侧持久化并下发扩展，契约同 state.rs SiteRule） */
 export interface SiteRule {
   host: string;
   name: string;
@@ -229,10 +231,17 @@ export const useAppStore = create<AppStore>()((set, get) => ({
     // 调低上限时同步收拢当前倍速（Rust 侧 save_settings 做同样的收口）
     set({ settings, rate: clampRate(s.rate, settings.sliderMax) });
   },
-  updateSiteRule: (host, patch) =>
-    set((s) => ({
-      siteRules: s.siteRules.map((r) => (r.host === host ? { ...r, ...patch } : r)),
-    })),
+  updateSiteRule: (host, patch) => {
+    // 本地即时生效（UI 无延迟），再推 Rust 落盘 + 下发扩展；回包以权威列表刷新
+    const siteRules = get().siteRules.map((r) => (r.host === host ? { ...r, ...patch } : r));
+    set({ siteRules });
+    const rule = siteRules.find((r) => r.host === host);
+    if (rule) {
+      void pushSiteRule(rule).then((list) => {
+        if (list) useAppStore.setState({ siteRules: list });
+      });
+    }
+  },
   setShortcut: (id, combo) => set((s) => ({ shortcuts: { ...s.shortcuts, [id]: combo } })),
   resetShortcuts: () => set({ shortcuts: { ...defaultShortcuts } }),
   saveShortcuts: async () => {
@@ -263,7 +272,12 @@ export const formatRate = (rate: number) =>
  * 3. 订阅全局热键 / 前台媒体 / 应用状态事件，实时刷新。
  */
 export async function initCoreSync() {
-  const [snap, media, apps] = await Promise.all([getCoreState(), getCurrentMedia(), listApps()]);
+  const [snap, media, apps, siteRules] = await Promise.all([
+    getCoreState(),
+    getCurrentMedia(),
+    listApps(),
+    listSiteRules(),
+  ]);
   if (snap) {
     useAppStore.setState({
       // 当前媒体可回读真实倍速时以它为准（优先于 Rust 侧记忆的全局倍速）
@@ -273,8 +287,9 @@ export async function initCoreSync() {
       conflicts: snap.conflicts,
       currentMedia: media,
       apps: apps ?? [],
-      // 设置以 Rust 持久化值为权威（M4）
+      // 设置与站点规则以 Rust 持久化值为权威（M4 / M3.5）
       settings: snap.settings,
+      siteRules: siteRules ?? defaultSiteRules,
       listening: snap.listening,
     });
   } else {

@@ -25,6 +25,9 @@ pub const PIPE_NAME: &str = r"\\.\pipe\omnispeed-nm";
 pub const HOST_NAME: &str = "com.omnispeed.host";
 /// 扩展 manifest.json 的 key 字段固定后得到的确定性 ID（见 apps/extension/README.md）
 pub const EXTENSION_ID: &str = "ejpnpjbhmgckjfdednjgfhdpobencmpb";
+/// Firefox 的 Gecko 扩展 ID（M3.5）：与扩展 build.mjs 的 GECKO_ID、
+/// dist-firefox manifest 的 browser_specific_settings.gecko.id 保持一致
+pub const GECKO_EXTENSION_ID: &str = "connector@omnispeed.app";
 
 /// 单帧上限：NM 规范中扩展方向 1MB，这里给足余量防御异常帧
 const MAX_FRAME: u32 = 4 * 1024 * 1024;
@@ -59,9 +62,36 @@ fn sender_of(browser: &str) -> Option<mpsc::UnboundedSender<Value>> {
 /// 由设置加载/保存时经 set_preserves_pitch 同步
 static PRESERVES_PITCH: AtomicBool = AtomicBool::new(true);
 
+/// 站点级规则的镜像（M3.5，同上不持有 Core 锁）：已按扩展协议 SiteRuleConfig
+/// 组好的 JSON 数组，由规则加载/保存时经 set_site_rules 同步
+static SITE_RULES: Mutex<Vec<Value>> = Mutex::new(Vec::new());
+
 /// 设置变化时更新镜像，并把新 config 推给所有已连接浏览器（targetRate 留空不改倍速）
 pub fn set_preserves_pitch(on: bool) {
     PRESERVES_PITCH.store(on, Ordering::Relaxed);
+    broadcast_config();
+}
+
+/// 站点规则加载/保存时同步镜像并即时推送（扩展协议 protocol.ts SiteRuleConfig：
+/// 只带扩展侧要用的字段，defaultRate 的进站恢复由桌面侧 on_frame 负责）
+pub fn set_site_rules(rules: &[crate::state::SiteRule]) {
+    let frames: Vec<Value> = rules
+        .iter()
+        .map(|r| {
+            json!({
+                "host": r.host,
+                "maxRate": r.max_rate,
+                "rateLock": r.rate_lock,
+                "follow": r.follow,
+            })
+        })
+        .collect();
+    *SITE_RULES.lock().expect("site rules poisoned") = frames;
+    broadcast_config();
+}
+
+/// 把当前 config 推给所有已连接浏览器（targetRate 留空不改倍速）
+fn broadcast_config() {
     let senders: Vec<mpsc::UnboundedSender<Value>> = SENDERS
         .lock()
         .expect("senders poisoned")
@@ -74,7 +104,8 @@ pub fn set_preserves_pitch(on: bool) {
 }
 
 fn config_frame(target_rate: Option<f64>) -> Value {
-    // rateLock 的站点级开关在 M3.5（站点规则）接线，当前全局开启
+    // 全局 rateLock 恒开；站点级锁定/上限/跟随由 siteRules 承载，
+    // 扩展内容脚本按自身 host 合成生效值（M3.5）
     json!({
         "type": "config",
         "config": {
@@ -82,6 +113,7 @@ fn config_frame(target_rate: Option<f64>) -> Value {
             "rateLock": true,
             "maxRate": RATE_MAX,
             "preservesPitch": PRESERVES_PITCH.load(Ordering::Relaxed),
+            "siteRules": SITE_RULES.lock().expect("site rules poisoned").clone(),
         }
     })
 }
@@ -183,11 +215,8 @@ async fn handle_connection(app: AppHandle, pipe: NamedPipeServer) {
     });
 
     // 读循环：hello / media 帧
-    loop {
-        match read_frame(&mut reader).await {
-            Ok(Some(frame)) => on_frame(&app, &browser, frame),
-            Ok(None) | Err(_) => break,
-        }
+    while let Ok(Some(frame)) = read_frame(&mut reader).await {
+        on_frame(&app, &browser, frame);
     }
 
     // 断开清理：连接表、媒体状态、前端状态广播
@@ -263,17 +292,26 @@ fn on_frame(app: &AppHandle, browser: &str, frame: Value) {
                             .map(|t| t.process_name == browser)
                             .unwrap_or(false);
 
-                        // 按网站记忆（开发文档 §7.5）：只在「上一帧 host → 本帧 host」的
-                        // 变化沿恢复一次，心跳帧不会重复触发，也不会打断热键正在下发的目标
-                        if is_current && m.has_media && !m.is_live && core.settings.remember_per_app
-                        {
+                        // 进站恢复：只在「上一帧 host → 本帧 host」的变化沿恢复一次，
+                        // 心跳帧不会重复触发，也不会打断热键正在下发的目标。
+                        // 优先级：按网站记忆（设置开启时，开发文档 §7.5）
+                        //   → 站点规则默认倍速（M3.5 siteRules.defaultRate）→ 不干预
+                        if is_current && m.has_media && !m.is_live {
                             let prev_host = core
                                 .browser_media
                                 .get(browser)
                                 .filter(|p| p.has_media)
                                 .map(|p| p.host.clone());
                             if prev_host.as_deref() != Some(m.host.as_str()) {
-                                if let Some(saved) = core.memory.get(&m.host).copied() {
+                                let remembered = if core.settings.remember_per_app {
+                                    core.memory.get(&m.host).copied()
+                                } else {
+                                    None
+                                };
+                                let site_default = core
+                                    .site_rule_for(&m.host)
+                                    .and_then(|r| r.default_rate);
+                                if let Some(saved) = remembered.or(site_default) {
                                     let target = clamp_rate(saved, RATE_MAX);
                                     core.rate = target;
                                     // 预写缓存：UI 即刻显示恢复值，页面随 setRate 收敛
@@ -392,8 +430,10 @@ async fn write_frame<W: tokio::io::AsyncWrite + Unpin>(w: &mut W, frame: &Value)
 // 注册（应用启动时执行）：宿主清单 + HKCU 注册表项，无需管理员
 // ---------------------------------------------------------------------------
 
-/// 写宿主清单与 .bat 启动器，并注册到 Chrome/Edge 的 HKCU 路径。
+/// 写宿主清单与 .bat 启动器，并注册到 Chrome / Edge / Firefox 的 HKCU 路径。
 /// Chrome 的 NM 清单不支持给 host 传参，因此用生成的 .bat 包一层 `--nm-host`。
+/// Firefox（M3.5）清单格式不同（allowed_extensions ↔ Gecko ID），单独一份文件，
+/// 注册到 HKCU\Software\Mozilla\NativeMessagingHosts（清单键名两家一致，均为 HOST_NAME）。
 pub fn register_host(app: &AppHandle) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let dir = app
@@ -410,26 +450,41 @@ pub fn register_host(app: &AppHandle) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
-    let manifest_path = dir.join(format!("{HOST_NAME}.json"));
-    let manifest = json!({
-        "name": HOST_NAME,
-        "description": "OmniSpeed Native Messaging host（浏览器扩展 ⟷ 桌面核心）",
-        "path": launcher.to_string_lossy(),
-        "type": "stdio",
-        "allowed_origins": [format!("chrome-extension://{EXTENSION_ID}/")],
-    });
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    let write_manifest = |file: &str, allow_key: &str, allow_value: String| -> Result<std::path::PathBuf, String> {
+        let path = dir.join(file);
+        let manifest = json!({
+            "name": HOST_NAME,
+            "description": "OmniSpeed Native Messaging host（浏览器扩展 ⟷ 桌面核心）",
+            "path": launcher.to_string_lossy(),
+            "type": "stdio",
+            allow_key: [allow_value],
+        });
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(path)
+    };
 
-    // Firefox 的清单格式（allowed_extensions）不同，扩展本体也未做 Gecko 兼容，留到 M3.5
+    let chromium_manifest = write_manifest(
+        &format!("{HOST_NAME}.json"),
+        "allowed_origins",
+        format!("chrome-extension://{EXTENSION_ID}/"),
+    )?;
+    let firefox_manifest = write_manifest(
+        &format!("{HOST_NAME}.firefox.json"),
+        "allowed_extensions",
+        GECKO_EXTENSION_ID.to_string(),
+    )?;
+
     let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
-    for root in [
-        r"Software\Google\Chrome\NativeMessagingHosts",
-        r"Software\Microsoft\Edge\NativeMessagingHosts",
-    ] {
+    let registrations = [
+        (r"Software\Google\Chrome\NativeMessagingHosts", &chromium_manifest),
+        (r"Software\Microsoft\Edge\NativeMessagingHosts", &chromium_manifest),
+        (r"Software\Mozilla\NativeMessagingHosts", &firefox_manifest),
+    ];
+    for (root, manifest_path) in registrations {
         let (key, _) = hkcu
             .create_subkey(format!(r"{root}\{HOST_NAME}"))
             .map_err(|e| e.to_string())?;

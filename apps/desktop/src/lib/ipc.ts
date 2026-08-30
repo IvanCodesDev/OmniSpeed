@@ -1,7 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AppInfo, AppRulePatch, MediaSession } from "../data";
-import type { Settings, ShortcutId } from "../store";
+import type { Settings, ShortcutId, SiteRule } from "../store";
 
 /** 浏览器预览（npm run dev）时所有 IPC 均为空操作，仅在 Tauri 环境生效 */
 
@@ -79,6 +79,20 @@ export async function pushAppRule(rule: AppRulePatch): Promise<AppInfo[] | null>
 export async function getCurrentMedia(): Promise<MediaSession | null> {
   if (!isTauri()) return null;
   return invoke<MediaSession | null>("get_current_media");
+}
+
+/* ── M3.5：站点级规则（应用页「网站适配」） ── */
+
+/** 站点规则列表（浏览器预览返回 null，由 store 回退默认表） */
+export async function listSiteRules(): Promise<SiteRule[] | null> {
+  if (!isTauri()) return null;
+  return invoke<SiteRule[]>("list_site_rules");
+}
+
+/** 保存单条站点规则，返回更新后的完整列表（Rust 落盘并即时推送浏览器扩展） */
+export async function pushSiteRule(rule: SiteRule): Promise<SiteRule[] | null> {
+  if (!isTauri()) return null;
+  return invoke<SiteRule[]>("save_site_rule", { rule });
 }
 
 /** 暂停 / 恢复全局监听 */

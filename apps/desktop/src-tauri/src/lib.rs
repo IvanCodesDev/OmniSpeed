@@ -108,6 +108,8 @@ pub fn run() {
             commands::set_hotkeys_enabled,
             commands::list_apps,
             commands::save_app_rule,
+            commands::list_site_rules,
+            commands::save_site_rule,
             commands::get_current_media,
             commands::set_listening,
             commands::apply_to_current,
@@ -124,6 +126,7 @@ pub fn run() {
                 persist::load(app.handle(), &mut core);
                 hotkey::apply_shortcuts(app.handle(), &mut core);
                 nm_bridge::set_preserves_pitch(core.settings.preserves_pitch);
+                nm_bridge::set_site_rules(&core.site_rules);
                 core.settings.start_on_boot
             };
             sync_autostart(app.handle(), start_on_boot);

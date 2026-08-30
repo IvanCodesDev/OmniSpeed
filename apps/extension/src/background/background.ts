@@ -260,7 +260,7 @@ function handleUserRate(tabId: number, frameId: number, rate: number): void {
   cachedConfig =
     cachedConfig !== null
       ? { ...cachedConfig, targetRate: rate }
-      : { targetRate: rate, rateLock: false, maxRate: 16, preservesPitch: true };
+      : { targetRate: rate, rateLock: false, maxRate: 16, preservesPitch: true, siteRules: [] };
   try {
     void chrome.storage.local.set({ [STORAGE_KEY_CONFIG]: cachedConfig });
   } catch {

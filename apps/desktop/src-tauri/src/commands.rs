@@ -3,7 +3,7 @@
 use crate::rules::{running_processes, to_app_info, AppInfo, AppRulePatch};
 use crate::state::{
     clamp_rate, Core, CoreSnapshot, CoreState, MediaSession, Settings, ShortcutAction,
-    ShortcutMap, RATE_MAX,
+    ShortcutMap, SiteRule, RATE_MAX,
 };
 use crate::{hotkey, nm_bridge, persist};
 use std::collections::HashMap;
@@ -145,6 +145,42 @@ pub fn save_app_rule(
     drop(core);
     let _ = app.emit("apps:status-changed", &infos);
     Ok(infos)
+}
+
+// ---------- M3.5：站点级规则 ----------
+
+/// 应用页「网站适配」列表（开发文档 §9 list_site_rules）
+#[tauri::command]
+pub fn list_site_rules(state: State<CoreState>) -> Vec<SiteRule> {
+    state.lock().expect("core state poisoned").site_rules.clone()
+}
+
+/// 保存单条站点规则（host 为键；未知 host 追加为自定义站点）。
+/// 落盘后把新规则表即时推送给所有已连接浏览器扩展；返回更新后的完整列表
+#[tauri::command]
+pub fn save_site_rule(
+    app: AppHandle,
+    state: State<CoreState>,
+    mut rule: SiteRule,
+) -> Result<Vec<SiteRule>, String> {
+    rule.normalize();
+    if rule.host.is_empty() {
+        return Err("站点 host 不能为空".into());
+    }
+    let rules = {
+        let mut core = state.lock().expect("core state poisoned");
+        if let Some(existing) = core.site_rules.iter_mut().find(|r| r.host == rule.host) {
+            let name = existing.name.clone();
+            *existing = rule;
+            existing.name = name; // 内置站点名以代码为准（自定义站点首存时已带名）
+        } else {
+            core.site_rules.push(rule);
+        }
+        persist::save(&app, &core)?;
+        core.site_rules.clone()
+    };
+    nm_bridge::set_site_rules(&rules);
+    Ok(rules)
 }
 
 /// 控制页「当前媒体」。倍速回读在 router 集成后填充（可回读的适配器以真实值为准）

@@ -15,7 +15,13 @@
  * 汇总，标题会被 SW 用 tab.title 覆盖，这里不用操心。
  */
 
-import type { ContentToSw, MediaState, RateConfig, SwToContent } from "../shared/protocol";
+import type {
+  ContentToSw,
+  MediaState,
+  RateConfig,
+  SiteRuleConfig,
+  SwToContent,
+} from "../shared/protocol";
 import { adapterFor } from "../sites";
 import {
   DEFAULT_MAX_RATE,
@@ -37,7 +43,44 @@ const config: RateConfig = {
   rateLock: false,
   maxRate: DEFAULT_MAX_RATE,
   preservesPitch: true,
+  siteRules: [],
 };
+
+// ============ 站点级规则（M3.5）：与全局配置合成本页生效值 ============
+
+/** host 后缀匹配："bilibili.com" 命中 "www.bilibili.com"，不误伤 "xbilibili.com" */
+function hostMatches(host: string, ruleHost: string): boolean {
+  return host === ruleHost || host.endsWith(`.${ruleHost}`);
+}
+
+/** 本页命中的站点规则；host 在页面生命周期内不变，缓存首个命中项 */
+let siteRuleCache: SiteRuleConfig | null | undefined;
+
+function siteRule(): SiteRuleConfig | null {
+  if (siteRuleCache === undefined) {
+    siteRuleCache =
+      (config.siteRules ?? []).find((r) => hostMatches(location.host, r.host)) ?? null;
+  }
+  return siteRuleCache;
+}
+
+/** 生效锁定 = 全局 rateLock ∧ 站点 rateLock（未命中规则视为开） */
+function effectiveRateLock(): boolean {
+  return config.rateLock && (siteRule()?.rateLock ?? true);
+}
+
+/** 生效上限 = min(全局, 站点)（未命中规则用全局） */
+function effectiveMaxRate(): number {
+  const site = siteRule()?.maxRate;
+  return typeof site === "number" && Number.isFinite(site)
+    ? Math.min(config.maxRate, site)
+    : config.maxRate;
+}
+
+/** 新出现媒体（短视频流滑动/切集换元素）是否跟随会话目标倍速 */
+function effectiveFollow(): boolean {
+  return siteRule()?.follow ?? true;
+}
 
 // ============ 与 rate-guard（MAIN world）通信 ============
 
@@ -46,11 +89,16 @@ function postToGuard(msg: ContentToGuard): void {
 }
 
 function syncGuardConfig(): void {
+  // guard 只认合成后的生效值：站点级锁定关闭时 MAIN world 不拦截任何写入
   postToGuard({
     ns: GUARD_NS,
     dir: "content->guard",
     type: "config",
-    config: { targetRate: config.targetRate, rateLock: config.rateLock, maxRate: config.maxRate },
+    config: {
+      targetRate: config.targetRate,
+      rateLock: effectiveRateLock(),
+      maxRate: effectiveMaxRate(),
+    },
   });
 }
 
@@ -60,9 +108,9 @@ function applyTarget(): void {
   postToGuard({ ns: GUARD_NS, dir: "content->guard", type: "setRate", rate: config.targetRate });
 }
 
-/** 自动干预（跟随/锁定恢复）的前提：有目标 + 锁定开启 + 非广告时段 */
+/** 自动干预（跟随/锁定恢复）的前提：有目标 + 生效锁定开启 + 非广告时段 */
 function shouldEnforce(): boolean {
-  return config.targetRate !== null && config.rateLock && !safeAdCheck();
+  return config.targetRate !== null && effectiveRateLock() && !safeAdCheck();
 }
 
 function safeAdCheck(): boolean {
@@ -105,8 +153,9 @@ function register(el: HTMLMediaElement): void {
   } catch {
     /* bwp-video 等鸭子类型可能不支持 */
   }
-  // 短视频流滑动跟随 + 切集恢复：新出现的媒体立即应用目标倍速（广告时段暂停干预）
-  if (shouldEnforce()) applyTarget();
+  // 短视频流滑动跟随 + 切集恢复：新出现的媒体立即应用目标倍速
+  // （广告时段暂停干预；站点规则 follow 关闭时新媒体从站点默认倍速起播）
+  if (shouldEnforce() && effectiveFollow()) applyTarget();
   reportSoon();
 }
 
@@ -295,7 +344,7 @@ let lastAdPlaying = false;
 window.setInterval(() => {
   prune();
   const ad = safeAdCheck();
-  if (lastAdPlaying && !ad && config.rateLock && config.targetRate !== null) {
+  if (lastAdPlaying && !ad && effectiveRateLock() && config.targetRate !== null) {
     // 广告 → 正片：恢复目标倍速（PRD §7.6）
     applyTarget();
   }
@@ -339,8 +388,11 @@ window.addEventListener("message", (e: MessageEvent) => {
 function applyConfig(next: RateConfig): void {
   config.maxRate = next.maxRate;
   config.rateLock = next.rateLock;
-  config.targetRate = next.targetRate === null ? null : clampRate(next.targetRate, next.maxRate);
   config.preservesPitch = next.preservesPitch;
+  config.siteRules = next.siteRules ?? [];
+  siteRuleCache = undefined; // 规则表更新 → 重新匹配本页命中项
+  config.targetRate =
+    next.targetRate === null ? null : clampRate(next.targetRate, effectiveMaxRate());
   syncGuardConfig();
   // preservesPitch 是实例属性，isolated 直接设即可（不受 world 隔离影响）
   prune();
@@ -363,7 +415,8 @@ try {
       case "media:setRate": {
         if (typeof msg.rate !== "number") break;
         // 显式指令（全局快捷键/控制页）：更新本地目标并转发 rate-guard 执行
-        config.targetRate = clampRate(msg.rate, config.maxRate);
+        // （站点上限低于全局时在此收口，OSD/控制页仍显示全局目标，页面以真实值回报）
+        config.targetRate = clampRate(msg.rate, effectiveMaxRate());
         postToGuard({
           ns: GUARD_NS,
           dir: "content->guard",
