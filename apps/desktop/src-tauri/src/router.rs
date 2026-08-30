@@ -8,8 +8,9 @@
 //!      以真实值校正 Core.rate 并广播 media:changed。
 
 use crate::adapters::{adapters_for, Adapter};
+use crate::hotkey::HotkeyPayload;
 use crate::rules::AppKind;
-use crate::state::{clamp_rate, Core, CoreState, RATE_MAX};
+use crate::state::{clamp_rate, Core, CoreState, ShortcutAction, RATE_MAX};
 use tauri::{AppHandle, Emitter, Manager};
 
 /// 当前接管对象的通道；前台尚未匹配到播放器时（焦点在编辑器等），
@@ -90,7 +91,7 @@ fn push_rate_blocking(app: &AppHandle, mode: PushMode) {
     let state = app.state::<CoreState>();
 
     // 同步快照：目标倍速与通道列表，锁内不做任何 IO
-    let (target_rate, adapters) = {
+    let (target_rate, adapters, is_client) = {
         let core = state.lock().expect("core state poisoned");
         if !core.listening {
             return;
@@ -99,7 +100,9 @@ fn push_rate_blocking(app: &AppHandle, mode: PushMode) {
         if adapters.is_empty() {
             return;
         }
-        (core.rate, adapters)
+        let is_client =
+            core.current_rule().map(|r| r.kind == AppKind::Client).unwrap_or(false);
+        (core.rate, adapters, is_client)
     };
 
     // 逐通道尝试：任一通道成功即止
@@ -122,6 +125,16 @@ fn push_rate_blocking(app: &AppHandle, mode: PushMode) {
         }
     }
     if !applied {
+        // M4.6：客户端（Client 规则）未接管时，热键静默失败会让用户误以为坏了。
+        // 仅热键路径提示（UI 的滑块/预设由应用页 CdpPanel 自己引导），且必须确认
+        // 确实是调试口离线（未接管），而不是「接管了但没在播视频」等其它失败
+        if is_client && matches!(mode, PushMode::Step { .. } | PushMode::Reset) {
+            let offline =
+                adapters.iter().any(|a| matches!(a, Adapter::Cdp(c) if !c.is_available()));
+            if offline {
+                notify_client_not_taken_over(app, target_rate, mode);
+            }
+        }
         return;
     }
 
@@ -136,6 +149,28 @@ fn push_rate_blocking(app: &AppHandle, mode: PushMode) {
     if session.is_some() {
         let _ = app.emit("media:changed", &session);
     }
+}
+
+/// 未接管客户端的热键 OSD 引导（M4.6）：复用 OSD 通道再发一帧带提示的载荷，
+/// 约半秒后盖掉同步拍那帧「看似成功」的倍速显示。rate 仍显示目标值——接管后即生效
+fn notify_client_not_taken_over(app: &AppHandle, rate: f64, mode: PushMode) {
+    let payload = {
+        let state = app.state::<CoreState>();
+        let mut core = state.lock().expect("core state poisoned");
+        core.osd_seq += 1;
+        HotkeyPayload {
+            action: match mode {
+                PushMode::Step { dir } if dir < 0 => ShortcutAction::SpeedDown,
+                PushMode::Reset => ShortcutAction::Reset,
+                _ => ShortcutAction::SpeedUp,
+            },
+            rate,
+            seq: core.osd_seq,
+            notice: Some("客户端未接管 · 应用页一键接管".into()),
+        }
+    };
+    let _ = app.emit("hotkey:triggered", payload.clone());
+    crate::osd::show(app, &payload);
 }
 
 /// 播放/暂停：直接走通道，无状态可回读

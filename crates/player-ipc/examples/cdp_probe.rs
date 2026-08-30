@@ -6,11 +6,13 @@
 //! cargo run --example cdp_probe -- <port> pp           # 播放/暂停
 //! cargo run --example cdp_probe -- <port> nav <url>    # 首个 page 目标 location.assign（造测试现场用）
 //! cargo run --example cdp_probe -- <port> ls           # 列出调试目标
+//! cargo run --example cdp_probe -- <port> eval <js>    # 播放器优先首目标执行任意 JS（模拟站点复位等）
+//! cargo run --example cdp_probe -- <port> guard <secs> # 持有 GuardSession N 秒（验证导航续速）
 //! ```
 //!
 //! 前置：目标客户端已以 `--remote-debugging-port=<port>` 启动。
 
-use player_ipc::CdpClient;
+use player_ipc::{CdpClient, GuardSession};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -49,6 +51,32 @@ fn main() {
                 Ok(target) => println!("nav → {target}"),
                 Err(e) => println!("nav ! {e}"),
             }
+        }
+        Some("eval") => {
+            let expr = args.get(2).expect("eval 需要 JS 表达式参数");
+            match client.eval_in_player(expr) {
+                Ok(v) => println!("eval = {v}"),
+                Err(e) => println!("eval ! {e}"),
+            }
+        }
+        Some("guard") => {
+            let secs: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30);
+            let targets = client.page_targets().expect("枚举目标失败");
+            let ws_url = targets.first().expect("客户端没有页面目标");
+            let mut session = GuardSession::open(ws_url).expect("GuardSession::open 失败");
+            println!("guard 已注册（on-new-document + 当前文档），持有 {secs}s：{ws_url}");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+            while std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                match session.heartbeat() {
+                    Ok(()) => println!("  heartbeat ok"),
+                    Err(e) => {
+                        println!("  heartbeat ! {e}（会话失效，退出）");
+                        break;
+                    }
+                }
+            }
+            println!("guard 会话结束");
         }
         Some(other) => println!("未知子命令：{other}"),
     }

@@ -455,13 +455,14 @@ mod tests {
     }
 
     fn core_with_target(process: &str, rule_id: &str) -> Core {
-        let mut core = Core::default();
-        core.current = Some(CurrentTarget {
-            rule_id: rule_id.into(),
-            hwnd: 0,
-            process_name: process.into(),
-        });
-        core
+        Core {
+            current: Some(CurrentTarget {
+                rule_id: rule_id.into(),
+                hwnd: 0,
+                process_name: process.into(),
+            }),
+            ..Core::default()
+        }
     }
 
     #[test]

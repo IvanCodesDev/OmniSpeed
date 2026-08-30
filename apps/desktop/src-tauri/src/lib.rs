@@ -2,6 +2,7 @@
 //! router / monitor / adapters / nm_bridge / updater / platform。
 
 mod adapters;
+mod client_guard;
 mod commands;
 mod hotkey;
 mod monitor;
@@ -149,6 +150,9 @@ pub fn run() {
                 eprintln!("[nm] 宿主注册失败：{err}");
             }
             nm_bridge::start(app.handle());
+
+            // 客户端防复位守护（M4.6）：维持 CDP 会话，导航后自动重装 guard 并续速
+            client_guard::start(app.handle());
 
             // 自动更新：启动后延时检查 + 每 24h 复查（设置「自动检查更新」控制）
             updater::start(app.handle());

@@ -27,7 +27,7 @@ mod vlc;
 pub mod mpc_hc;
 pub mod potplayer;
 
-pub use cdp::CdpClient;
+pub use cdp::{CdpClient, GuardSession};
 pub use mpv::MpvClient;
 pub use vlc::VlcHttpClient;
 
