@@ -145,12 +145,14 @@ pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutEvent) {
     match action {
         ShortcutAction::SpeedUp => {
             let cap = hotkey_rate_cap(&core);
-            core.rate = clamp_rate(core.rate + core.settings.step, cap);
+            let next = stepped_rate(&core, 1);
+            core.rate = clamp_rate(next, cap);
             remembered = core.remember_rate();
         }
         ShortcutAction::SpeedDown => {
             let cap = hotkey_rate_cap(&core);
-            core.rate = clamp_rate(core.rate - core.settings.step, cap);
+            let next = stepped_rate(&core, -1);
+            core.rate = clamp_rate(next, cap);
             remembered = core.remember_rate();
         }
         ShortcutAction::Reset => {
@@ -196,6 +198,16 @@ fn is_browser_target(core: &Core) -> bool {
         .map(|r| r.kind == AppKind::Browser)
         .unwrap_or(false)
         || (core.current.is_none() && !core.connected_browsers.is_empty())
+}
+
+/// 步进目标值。接管对象若只认按键（百度网盘这类），它的倍速就只能落在自己的网格上，
+/// 那就按整格走：OSD 当场显示的即是播放器真会到的值，不必等回读回来再改口。
+fn stepped_rate(core: &Core, dir: i32) -> f64 {
+    let step = core.settings.step;
+    core.current_rule()
+        .and_then(|rule| rule.key_rate.as_ref())
+        .and_then(|grid| grid.step_target(core.rate, step, dir))
+        .unwrap_or_else(|| core.rate + step * f64::from(dir))
 }
 
 /// 浏览器内核上限 16×；滑块上限只约束控制页 UI，不该挡住全局热键打到网页视频。

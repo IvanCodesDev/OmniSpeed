@@ -24,6 +24,21 @@ export interface AppIpcConfig {
   password: string | null;
 }
 
+/**
+ * 播放器自身快捷键构成的倍速网格（Rust `KeyRateGrid`）。
+ * 有它说明该播放器的某些按键给的是**绝对倍速**（如百度网盘桌面端的数字键 1–5），
+ * 于是按键通道也能精确设速：先按最近的档位键钉住，再用步进键补足差额。
+ */
+export interface AppKeyRate {
+  anchors: { key: string; rate: number }[];
+  /** up/down 每按一次的增减量 */
+  step: number;
+  min: number;
+  max: number;
+  /** 连发步进键的最小间隔，贴着发会被播放器吞掉步进（各播放器实测值） */
+  stepGapMs: number;
+}
+
 /** 应用适配条目（Rust `list_apps` / `apps:status-changed`） */
 export interface AppInfo {
   id: string;
@@ -42,6 +57,8 @@ export interface AppInfo {
   builtin: boolean;
   keys: AppRuleKeys | null;
   ipcConfig: AppIpcConfig | null;
+  /** 非空 = 按键通道可精确设速，应用页据此说明可用区间与精度 */
+  keyRate: AppKeyRate | null;
 }
 
 /** 「应用页」保存规则的提交体（Rust `save_app_rule`，返回更新后的完整列表） */
@@ -109,6 +126,7 @@ export const managedApps: AppInfo[] = [
     builtin: true,
     keys: null,
     ipcConfig: null,
+    keyRate: null,
   },
   {
     id: "chrome",
@@ -123,6 +141,7 @@ export const managedApps: AppInfo[] = [
     builtin: true,
     keys: null,
     ipcConfig: null,
+    keyRate: null,
   },
   {
     id: "vlc",
@@ -137,6 +156,7 @@ export const managedApps: AppInfo[] = [
     builtin: true,
     keys: { up: "]", down: "[", reset: "=" },
     ipcConfig: { pipe: null, port: 8080, password: null },
+    keyRate: null,
   },
   {
     id: "potplayer",
@@ -151,6 +171,7 @@ export const managedApps: AppInfo[] = [
     builtin: true,
     keys: { up: "C", down: "X", reset: "Z" },
     ipcConfig: null,
+    keyRate: null,
   },
   {
     id: "mpv",
@@ -165,6 +186,7 @@ export const managedApps: AppInfo[] = [
     builtin: true,
     keys: { up: "]", down: "[", reset: "Backspace" },
     ipcConfig: { pipe: "\\\\.\\pipe\\mpvsocket", port: null, password: null },
+    keyRate: null,
   },
   {
     id: "bilibili-client",
@@ -179,6 +201,28 @@ export const managedApps: AppInfo[] = [
     builtin: true,
     keys: null,
     ipcConfig: { pipe: null, port: 9333, password: null },
+    keyRate: null,
+  },
+  {
+    id: "baidu-netdisk",
+    name: "百度网盘",
+    process: "baidunetdiskunite.exe",
+    kind: "client",
+    status: "adapted",
+    method: "hotkey",
+    methodLabel: "播放器快捷键 · 精确设速",
+    ipc: "none",
+    running: false,
+    builtin: true,
+    keys: { up: ".", down: ",", reset: "1" },
+    ipcConfig: null,
+    keyRate: {
+      anchors: [1, 2, 3, 4, 5].map((rate) => ({ key: String(rate), rate })),
+      step: 0.1,
+      min: 0.5,
+      max: 5,
+      stepGapMs: 150,
+    },
   },
   {
     id: "unknown",
@@ -193,6 +237,7 @@ export const managedApps: AppInfo[] = [
     builtin: false,
     keys: null,
     ipcConfig: null,
+    keyRate: null,
   },
 ];
 

@@ -5,7 +5,14 @@ import { AppIcon } from "../components/AppIcon";
 import { Segmented } from "../components/Segmented";
 import { Select } from "../components/Select";
 import { Toggle } from "../components/Toggle";
-import { brandOf, statusText, type AppInfo, type AppRulePatch, type AppStatus } from "../data";
+import {
+  brandOf,
+  statusText,
+  type AppInfo,
+  type AppKeyRate,
+  type AppRulePatch,
+  type AppStatus,
+} from "../data";
 import { cn } from "../lib/cn";
 import { takeoverClient } from "../lib/ipc";
 import { formatRate, useAppStore } from "../store";
@@ -79,6 +86,27 @@ function SiteRulesPanel() {
         </div>
       ))}
     </div>
+  );
+}
+
+/**
+ * 该播放器的某些按键给的是绝对倍速（如百度网盘桌面端的数字键 1–5），
+ * OmniSpeed 会「先按档位键钉住、再按步进键补差额」，所以按键通道也能一步到精确值。
+ * 说明可用区间与精度，以及按键通道绕不开的前提：播放器窗口得在前台。
+ */
+function KeyRateNote({ keyRate }: { keyRate: AppKeyRate }) {
+  const anchors = keyRate.anchors.map((a) => a.key).join(" / ");
+  return (
+    <p className="rounded-xl border border-accent/25 bg-accent/[0.06] px-3 py-2.5 text-[12px] leading-relaxed text-ink-2">
+      该播放器的 <b>{anchors}</b> 键可直接设为对应倍速，OmniSpeed 据此先定档再微调，
+      因此滑块与预设也能精确生效——范围 {keyRate.min}×–{keyRate.max}×，精度{" "}
+      {keyRate.step}×（超出范围取端点，中间值就近取整）。
+      <br />
+      档位之间的值靠连按步进键补足，每次间隔 {keyRate.stepGapMs} 毫秒（播放器读回上一次倍速要时间，
+      贴着发会被吞掉步进），所以跨档位设速时能看见倍速爬升半秒左右，属正常。
+      <br />
+      注意：模拟按键需要该播放器窗口在前台，OmniSpeed 会在下发前自动把它激活。
+    </p>
   );
 }
 
@@ -301,6 +329,7 @@ function RuleEditor({ app }: { app: AppInfo }) {
           <p className="rounded-xl bg-card-2/60 px-3 py-2.5 text-[12px] leading-relaxed text-mute">
             这里绑定的是目标软件自身的调速快捷键，OmniSpeed 会替你按下；与「快捷键」页的全局快捷键是两回事。
           </p>
+          {app.keyRate && <KeyRateNote keyRate={app.keyRate} />}
         </div>
       )}
 
