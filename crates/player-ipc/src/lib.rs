@@ -8,6 +8,7 @@
 //! | --- | --- | --- | --- |
 //! | mpv | JSON-IPC（Windows 命名管道） | [`MpvClient`]（设速/读速/播放暂停） | `"mpv-ipc"`（`pipe` 参数） |
 //! | VLC | HTTP 接口 status.xml | [`VlcHttpClient`]（设速/读速/播放暂停） | `"vlc-http"`（`port` 参数） |
+//! | Chromium 套壳客户端（B 站桌面端等） | CDP 调试口（HTTP + WebSocket） | [`CdpClient`]（设速/读速/播放暂停） | `"cdp"`（`port` 参数） |
 //! | PotPlayer | 窗口消息（WM_USER SDK / WM_COMMAND） | [`potplayer`] 消息码常量表 + 换算函数 | 由主程序结合 platform-win 使用 |
 //! | MPC-HC | 窗口消息（WM_COMMAND） | [`mpc_hc`] 消息码常量表 | 同上 |
 //!
@@ -20,11 +21,13 @@
 
 use thiserror::Error;
 
+mod cdp;
 mod mpv;
 mod vlc;
 pub mod mpc_hc;
 pub mod potplayer;
 
+pub use cdp::CdpClient;
 pub use mpv::MpvClient;
 pub use vlc::VlcHttpClient;
 

@@ -6,9 +6,9 @@
 
 export type AppStatus = "connected" | "adapted" | "needs-setup";
 export type BrandId = "chrome" | "edge" | "vlc" | "potplayer" | "unknown";
-export type AppKind = "browser" | "player" | "unknown";
-/** 播放器 IPC 通道类型（开发文档 §7.3） */
-export type IpcKind = "mpv-ipc" | "vlc-http" | "wm-command" | "none";
+export type AppKind = "browser" | "player" | "client" | "unknown";
+/** 播放器 IPC 通道类型（开发文档 §7.3；cdp = Chromium 套壳客户端调试口接管） */
+export type IpcKind = "mpv-ipc" | "vlc-http" | "wm-command" | "cdp" | "none";
 export type AppMethod = "auto" | "ipc" | "hotkey" | "extension";
 
 /** 目标软件自身的调速快捷键（PRD §7.2：OmniSpeed 模拟按键「替用户按」） */
@@ -165,6 +165,20 @@ export const managedApps: AppInfo[] = [
     builtin: true,
     keys: { up: "]", down: "[", reset: "Backspace" },
     ipcConfig: { pipe: "\\\\.\\pipe\\mpvsocket", port: null, password: null },
+  },
+  {
+    id: "bilibili-client",
+    name: "哔哩哔哩桌面端",
+    process: "哔哩哔哩.exe",
+    kind: "client",
+    status: "adapted",
+    method: "ipc",
+    methodLabel: "CDP 接管",
+    ipc: "cdp",
+    running: false,
+    builtin: true,
+    keys: null,
+    ipcConfig: { pipe: null, port: 9333, password: null },
   },
   {
     id: "unknown",

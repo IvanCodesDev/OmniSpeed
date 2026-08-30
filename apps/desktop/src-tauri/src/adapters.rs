@@ -13,7 +13,10 @@
 
 use crate::rules::{AppRule, IpcKind, KeyBindings, RuleMethod};
 use crate::state::CurrentTarget;
-use player_ipc::{mpc_hc, potplayer, MpvClient, VlcHttpClient, WM_COMMAND, WM_USER};
+use player_ipc::{mpc_hc, potplayer, CdpClient, MpvClient, VlcHttpClient, WM_COMMAND, WM_USER};
+
+/// CDP 接管的默认调试端口（内置规则均显式带 port，这里兜底自定义规则漏配）
+pub const CDP_DEFAULT_PORT: u16 = 9333;
 
 /// 单次控制成功后的回读值（仅可回读通道为 Some）
 pub type ReadBack = Option<f64>;
@@ -28,6 +31,9 @@ pub enum Adapter {
     MpcHc { hwnd: isize },
     /// 浏览器扩展（Native Messaging）：精确设速，真实状态经扩展异步上报（开发文档 §3 非对称控制）
     Browser { process: String },
+    /// Chromium 套壳客户端（B 站桌面端等）的 CDP 调试口：精确设速 + 回读，
+    /// 需先「接管」（带 --remote-debugging-port 启动，见 commands::takeover_client）
+    Cdp(CdpClient),
     /// 模拟播放器自身快捷键：需要目标窗口前台（开发文档 §7.3 兜底通道）
     Keys { hwnd: isize, keys: KeyBindings },
 }
@@ -71,6 +77,14 @@ pub fn adapters_for(rule: &AppRule, target: &CurrentTarget) -> Vec<Adapter> {
                 }),
                 _ => {}
             },
+            IpcKind::Cdp => {
+                let port = rule
+                    .ipc_config
+                    .as_ref()
+                    .and_then(|c| c.port)
+                    .unwrap_or(CDP_DEFAULT_PORT);
+                list.push(Adapter::Cdp(CdpClient::new(port)));
+            }
             IpcKind::None => {}
         }
     }
@@ -99,6 +113,7 @@ impl Adapter {
             Adapter::Mpv(c) => c.get_speed().ok(),
             Adapter::Vlc(c) => c.get_rate().ok(),
             Adapter::PotPlayer { hwnd } => pot_read_speed(*hwnd),
+            Adapter::Cdp(c) => c.get_rate().ok(),
             _ => None,
         }
     }
@@ -134,6 +149,8 @@ impl Adapter {
             Adapter::Browser { process } => {
                 crate::nm_bridge::send_set_rate(process, rate).map(|_| None)
             }
+            // 未接管（调试口不在线）→ Unavailable 错误，由应用页「接管」引导开通
+            Adapter::Cdp(c) => c.set_rate(rate).map_err(|e| e.to_string()),
             Adapter::MpcHc { .. } | Adapter::Keys { .. } => {
                 Err("该通道仅支持步进，不支持设置精确倍速".into())
             }
@@ -145,7 +162,7 @@ impl Adapter {
         match self {
             // 可精确设值的通道不走播放器档位：上层直接用 set_rate
             Adapter::Mpv(_) | Adapter::Vlc(_) | Adapter::PotPlayer { .. }
-            | Adapter::Browser { .. } => Err("该通道请使用 set_rate".into()),
+            | Adapter::Browser { .. } | Adapter::Cdp(_) => Err("该通道请使用 set_rate".into()),
             Adapter::MpcHc { hwnd } => {
                 if !window_alive(*hwnd) {
                     return Err("MPC-HC 窗口不存在".into());
@@ -164,7 +181,7 @@ impl Adapter {
     pub fn reset(&self) -> Result<ReadBack, String> {
         match self {
             Adapter::Mpv(_) | Adapter::Vlc(_) | Adapter::PotPlayer { .. }
-            | Adapter::Browser { .. } => self.set_rate(1.0),
+            | Adapter::Browser { .. } | Adapter::Cdp(_) => self.set_rate(1.0),
             Adapter::MpcHc { hwnd } => {
                 if !window_alive(*hwnd) {
                     return Err("MPC-HC 窗口不存在".into());
@@ -184,6 +201,7 @@ impl Adapter {
             Adapter::Mpv(c) => c.play_pause().map_err(|e| e.to_string()),
             Adapter::Vlc(c) => c.play_pause().map_err(|e| e.to_string()),
             Adapter::Browser { process } => crate::nm_bridge::send_play_pause(process),
+            Adapter::Cdp(c) => c.play_pause().map_err(|e| e.to_string()),
             Adapter::PotPlayer { hwnd } => {
                 if !window_alive(*hwnd) {
                     return Err("PotPlayer 窗口不存在".into());

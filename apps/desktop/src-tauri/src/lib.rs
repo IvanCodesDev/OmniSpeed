@@ -113,6 +113,7 @@ pub fn run() {
             commands::get_current_media,
             commands::set_listening,
             commands::apply_to_current,
+            commands::takeover_client,
             updater::install_update,
         ])
         .setup(|app| {

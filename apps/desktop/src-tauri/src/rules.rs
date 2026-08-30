@@ -11,6 +11,8 @@ use std::collections::HashSet;
 pub enum AppKind {
     Browser,
     Player,
+    /// 平台桌面客户端（B 站桌面端等 Chromium 套壳应用，走 CDP 接管）
+    Client,
     Unknown,
 }
 
@@ -39,6 +41,8 @@ pub enum IpcKind {
     MpvIpc,
     VlcHttp,
     WmCommand,
+    /// Chromium 套壳客户端的 CDP 调试口（`port` 参数；需先「接管」带参启动）
+    Cdp,
     None,
 }
 
@@ -97,9 +101,12 @@ impl AppRule {
         match self.method {
             RuleMethod::Extension => "浏览器扩展".into(),
             RuleMethod::Hotkey => "快捷键".into(),
+            RuleMethod::Ipc if self.ipc == IpcKind::Cdp => "CDP 接管".into(),
             RuleMethod::Ipc => "IPC 接口".into(),
             RuleMethod::Auto => {
-                if self.ipc != IpcKind::None {
+                if self.ipc == IpcKind::Cdp {
+                    "CDP 接管".into()
+                } else if self.ipc != IpcKind::None {
                     "IPC 接口 · 按键兜底".into()
                 } else {
                     "快捷键".into()
@@ -173,6 +180,20 @@ pub fn built_in_rules() -> Vec<AppRule> {
             ipc: IpcKind::WmCommand,
             ipc_config: None,
             keys: keys("Ctrl+Up", "Ctrl+Down", "R"),
+            builtin: true,
+        },
+        // 平台桌面客户端（Chromium 套壳，CDP 接管；进程名即客户端 exe 名）。
+        // 端口各占一个，避免多客户端同时接管时相互串线
+        AppRule {
+            id: "bilibili-client".into(),
+            name: "哔哩哔哩桌面端".into(),
+            process: "哔哩哔哩.exe".into(),
+            aliases: vec!["bilibili.exe".into()],
+            kind: AppKind::Client,
+            method: RuleMethod::Ipc,
+            ipc: IpcKind::Cdp,
+            ipc_config: Some(IpcSettings { port: Some(9333), ..Default::default() }),
+            keys: None,
             builtin: true,
         },
         AppRule {

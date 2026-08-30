@@ -7,7 +7,7 @@ use crate::state::{
 };
 use crate::{hotkey, nm_bridge, persist};
 use std::collections::HashMap;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// 前端启动时一次性拉取核心状态
 #[tauri::command]
@@ -181,6 +181,108 @@ pub fn save_site_rule(
     };
     nm_bridge::set_site_rules(&rules);
     Ok(rules)
+}
+
+// ---------- M4.5：平台桌面客户端（CDP 接管） ----------
+
+/// 接管 Chromium 套壳客户端：确保其带 CDP 调试口运行（应用页「接管」按钮）。
+/// 调试口已在线 → 直接返回；在运行但无调试口 → 结束进程后带参重启；
+/// 未运行 → 报错引导用户先打开客户端。轮询等待较久，放 blocking 池不占事件循环。
+#[tauri::command]
+pub async fn takeover_client(app: AppHandle, id: String) -> Result<String, String> {
+    let (name, process, aliases, port) = {
+        let state = app.state::<CoreState>();
+        let core = state.lock().expect("core state poisoned");
+        let rule = core
+            .rules
+            .iter()
+            .find(|r| r.id == id)
+            .ok_or_else(|| format!("未知应用规则：{id}"))?;
+        if rule.ipc != crate::rules::IpcKind::Cdp {
+            return Err(format!("{} 不使用 CDP 接管", rule.name));
+        }
+        let port = rule
+            .ipc_config
+            .as_ref()
+            .and_then(|c| c.port)
+            .unwrap_or(crate::adapters::CDP_DEFAULT_PORT);
+        (rule.name.clone(), rule.process.clone(), rule.aliases.clone(), port)
+    };
+    tauri::async_runtime::spawn_blocking(move || takeover_blocking(&name, &process, &aliases, port))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn takeover_blocking(
+    name: &str,
+    process: &str,
+    aliases: &[String],
+    port: u16,
+) -> Result<String, String> {
+    use player_ipc::CdpClient;
+    use std::time::Duration;
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+    let client = CdpClient::new(port);
+    if client.is_available() {
+        return Ok(format!("「{name}」已在接管中（本机控制端口 {port} 在线）"));
+    }
+
+    let name_matches = |n: &str| n == process || aliases.iter().any(|a| a == n);
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
+    );
+    let running: Vec<_> = sys
+        .processes()
+        .values()
+        .filter(|p| name_matches(&p.name().to_string_lossy().to_lowercase()))
+        .collect();
+    let Some(exe) = running.iter().find_map(|p| p.exe().map(|e| e.to_path_buf())) else {
+        return Err(format!(
+            "「{name}」未在运行。请先打开它再点「接管」（接管会重启客户端并开启仅本机可见的控制端口）"
+        ));
+    };
+
+    // Electron 单实例锁：不退干净的话，新实例会把参数转交旧实例后自行退出，参数即丢失
+    for p in &running {
+        p.kill();
+    }
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(200));
+        let mut probe = System::new();
+        probe.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        if !probe
+            .processes()
+            .values()
+            .any(|p| name_matches(&p.name().to_string_lossy().to_lowercase()))
+        {
+            break;
+        }
+    }
+
+    std::process::Command::new(&exe)
+        .arg(format!("--remote-debugging-port={port}"))
+        .spawn()
+        .map_err(|e| format!("重启 {} 失败：{e}", exe.display()))?;
+
+    for _ in 0..50 {
+        std::thread::sleep(Duration::from_millis(200));
+        if client.is_available() {
+            return Ok(format!(
+                "已接管「{name}」：控制端口 {port} 在线，播放视频后全局快捷键即刻可用"
+            ));
+        }
+    }
+    Err(format!(
+        "「{name}」已重启，但控制端口 {port} 未上线；该客户端版本可能不接受调试参数"
+    ))
 }
 
 /// 控制页「当前媒体」。倍速回读在 router 集成后填充（可回读的适配器以真实值为准）

@@ -7,6 +7,7 @@ import { Select } from "../components/Select";
 import { Toggle } from "../components/Toggle";
 import { brandOf, statusText, type AppInfo, type AppRulePatch, type AppStatus } from "../data";
 import { cn } from "../lib/cn";
+import { takeoverClient } from "../lib/ipc";
 import { formatRate, useAppStore } from "../store";
 
 const dotColor: Record<AppStatus, string> = {
@@ -81,6 +82,56 @@ function SiteRulesPanel() {
   );
 }
 
+/** Chromium 套壳客户端（B 站桌面端等）的 CDP 接管面板（M4.5） */
+function CdpPanel({ app }: { app: AppInfo }) {
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  const takeover = async () => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      setMessage(await takeoverClient(app.id));
+      setFailed(false);
+    } catch (e) {
+      setMessage(String(e));
+      setFailed(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-3.5">
+      <p className="rounded-xl bg-card-2/60 px-3 py-2.5 text-[12px] leading-relaxed text-mute">
+        该客户端是 Chromium 套壳应用，OmniSpeed 通过仅本机可见的 CDP
+        调试通道直接控制其内部视频（0.25×–16× 精确设速、可回读）。首次使用请在客户端运行时点「接管」——会重启该客户端并开启控制端口，之后全局快捷键即刻生效。
+      </p>
+      <button
+        onClick={() => void takeover()}
+        disabled={busy}
+        className={cn(
+          "h-10 w-full rounded-xl text-sm font-semibold transition-all active:scale-[0.98]",
+          busy ? "bg-card-2 text-mute" : "bg-accent text-on-accent",
+        )}
+      >
+        {busy ? "接管中…（客户端会重启）" : "接管客户端"}
+      </button>
+      {message && (
+        <p
+          className={cn(
+            "rounded-xl px-3 py-2.5 text-[12px] leading-relaxed",
+            failed ? "bg-[#f0604d]/10 text-[#dd4531]" : "bg-emerald-500/10 text-emerald-600",
+          )}
+        >
+          {message}
+        </p>
+      )}
+    </div>
+  );
+}
+
 /** 该应用当前规则的首选编辑 Tab */
 const methodOf = (app: AppInfo): RuleMethod => (app.method === "extension" ? "hotkey" : app.method);
 
@@ -119,13 +170,15 @@ function RuleEditor({ app }: { app: AppInfo }) {
       name: app.name,
       method,
       keys: hasKeys ? trimmed : null,
-      // 按 IPC 通道类型提交对应配置（mpv 管道 / VLC HTTP 端口与密码），切换控制方式不丢配置
+      // 按 IPC 通道类型提交对应配置（mpv 管道 / VLC HTTP 端口与密码 / CDP 调试端口），切换控制方式不丢配置
       ipcConfig:
         app.ipc === "mpv-ipc"
           ? { pipe: pipe.trim() || null, port: null, password: null }
           : app.ipc === "vlc-http"
             ? { pipe: null, port: Number.isFinite(portNum) ? portNum : null, password: password || null }
-            : null,
+            : app.ipc === "cdp"
+              ? { pipe: null, port: app.ipcConfig?.port ?? null, password: null }
+              : null,
     };
     void saveAppRule(patch).then(() => {
       setJustSaved(true);
@@ -215,6 +268,7 @@ function RuleEditor({ app }: { app: AppInfo }) {
               PotPlayer 通过窗口控制消息（WM_COMMAND）直接设速，无需配置、无需窗口前台。
             </p>
           )}
+          {app.ipc === "cdp" && <CdpPanel app={app} />}
           {app.ipc === "none" && (
             <p className="rounded-xl border border-dashed border-line bg-card-2/40 px-4 py-6 text-center text-[12.5px] leading-relaxed text-mute">
               未发现该应用的已知控制接口，

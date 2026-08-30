@@ -75,6 +75,12 @@ export async function pushAppRule(rule: AppRulePatch): Promise<AppInfo[] | null>
   return invoke<AppInfo[]>("save_app_rule", { rule });
 }
 
+/** 接管 Chromium 套壳客户端（带 CDP 调试口重启，应用页「接管」按钮）；返回结果文案 */
+export async function takeoverClient(id: string): Promise<string> {
+  if (!isTauri()) return "仅在桌面应用内可用";
+  return invoke<string>("takeover_client", { id });
+}
+
 /** 当前被接管的媒体（null = 无接管对象） */
 export async function getCurrentMedia(): Promise<MediaSession | null> {
   if (!isTauri()) return null;
