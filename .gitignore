@@ -18,6 +18,9 @@ docs/
 .cursor/
 .codex/
 
+# 真机验证用的一次性脚本（E2E 编排、倍速回读探针等）
+.tmp-*
+
 # Editor / OS
 .idea/
 *.suo
