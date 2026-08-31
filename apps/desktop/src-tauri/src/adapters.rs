@@ -8,8 +8,9 @@
 //! | mpv JSON-IPC | ✅ | ✅ | 远超 16× |
 //! | VLC HTTP | ✅ | ✅ | ~16× |
 //! | PotPlayer WM_USER SDK | ✅（lParam=倍速×1000） | ✅ | 12×（SDK 区间） |
-//! | MPC-HC WM_COMMAND | ❌ 仅步进 | ❌ | 步长随版本/设置 |
-//! | 模拟按键 | ❌ 仅步进 | ❌ | 随播放器 |
+//! | MPC-HC WM_COMMAND | ✅（14 档绝对倍速码，就近取档） | ❌（终值由档位本身确定） | 8× |
+//! | MPC-BE WM_COMMAND | ❌ 仅步进（无绝对倍速码） | ❌ | 步长随设置 |
+//! | 模拟按键 | ❌ 仅步进（有 [`KeyRateGrid`] 时可精确） | ❌ | 随播放器 |
 
 use crate::rules::{AppRule, IpcKind, KeyBindings, KeyPlan, KeyRateGrid, RuleMethod};
 use crate::state::CurrentTarget;
@@ -27,8 +28,10 @@ pub enum Adapter {
     Vlc(VlcHttpClient),
     /// PotPlayer 官方 WM_USER SDK：一步精确设速 + 回读，无需前台
     PotPlayer { hwnd: isize },
-    /// MPC-HC WM_COMMAND 命令码：仅档位步进，无需前台
-    MpcHc { hwnd: isize },
+    /// MPC 系（HC / BE）的 WM_COMMAND 命令码，无需前台。
+    /// `ladder` 有值时该版本支持绝对倍速命令，可一条消息落到确定档位；
+    /// 为空（MPC-BE、原版 1.7.13）则只能 INC/DECRATE 步进
+    MpcHc { hwnd: isize, ladder: Option<Vec<f64>> },
     /// 浏览器扩展（Native Messaging）：精确设速，真实状态经扩展异步上报（开发文档 §3 非对称控制）
     Browser { process: String },
     /// Chromium 套壳客户端（B 站桌面端等）的 CDP 调试口：精确设速 + 回读，
@@ -75,6 +78,11 @@ pub fn adapters_for(rule: &AppRule, target: &CurrentTarget) -> Vec<Adapter> {
                 }),
                 "mpc-hc" => list.push(Adapter::MpcHc {
                     hwnd: resolve_hwnd(&[mpc_hc::WINDOW_CLASS], target),
+                    ladder: rule.rate_ladder.clone(),
+                }),
+                "mpc-be" => list.push(Adapter::MpcHc {
+                    hwnd: resolve_hwnd(&[mpc_hc::WINDOW_CLASS_MPC_BE], target),
+                    ladder: rule.rate_ladder.clone(),
                 }),
                 _ => {}
             },
@@ -159,6 +167,19 @@ impl Adapter {
                 send_key_plan(*hwnd, &plan)?;
                 Ok(Some(plan.rate))
             }
+            // 绝对倍速命令：一条 WM_COMMAND 直接落到该档，与播放器原状态无关。
+            // 因此这个「就近取到的档位值」本身就是确切的生效值，可以当回读值申报——
+            // MPC-HC 没有任何回读通道，不这么算 OSD 就只能报开环估算
+            Adapter::MpcHc { hwnd, ladder: Some(ladder) } => {
+                if !window_alive(*hwnd) {
+                    return Err("MPC-HC 窗口不存在".into());
+                }
+                let exact = crate::rules::snap_to_ladder(ladder, rate)
+                    .ok_or("倍速非法，取不到 MPC-HC 档位")?;
+                let cmd = mpc_hc::command_for(exact).ok_or("该档位没有对应的绝对倍速命令")?;
+                platform_win::send_message(*hwnd, WM_COMMAND, cmd, 0);
+                Ok(Some(exact))
+            }
             Adapter::MpcHc { .. } | Adapter::Keys { .. } => {
                 Err("该通道仅支持步进，不支持设置精确倍速".into())
             }
@@ -171,7 +192,7 @@ impl Adapter {
             // 可精确设值的通道不走播放器档位：上层直接用 set_rate
             Adapter::Mpv(_) | Adapter::Vlc(_) | Adapter::PotPlayer { .. }
             | Adapter::Browser { .. } | Adapter::Cdp(_) => Err("该通道请使用 set_rate".into()),
-            Adapter::MpcHc { hwnd } => {
+            Adapter::MpcHc { hwnd, .. } => {
                 if !window_alive(*hwnd) {
                     return Err("MPC-HC 窗口不存在".into());
                 }
@@ -192,12 +213,14 @@ impl Adapter {
             | Adapter::Browser { .. } | Adapter::Cdp(_) => self.set_rate(1.0),
             // 1× 通常正是某个档位键，一键到位且终值确定，比 reset 键多一个回读值
             Adapter::Keys { grid: Some(_), .. } => self.set_rate(1.0),
-            Adapter::MpcHc { hwnd } => {
+            // RESETRATE 是唯一一条在 MPC 全系（HC / BE / 原版）上都必然把倍速钉到 1.0 的命令，
+            // 比绝对倍速码适用面更广，所以恢复走它；终值确定，可以申报 1.0 作回读值
+            Adapter::MpcHc { hwnd, .. } => {
                 if !window_alive(*hwnd) {
                     return Err("MPC-HC 窗口不存在".into());
                 }
                 platform_win::send_message(*hwnd, WM_COMMAND, mpc_hc::ID_PLAY_RESETRATE, 0);
-                Ok(None)
+                Ok(Some(1.0))
             }
             Adapter::Keys { hwnd, keys, .. } => {
                 send_key_to(*hwnd, &keys.reset.clone())?;
@@ -224,7 +247,7 @@ impl Adapter {
                 );
                 Ok(())
             }
-            Adapter::MpcHc { hwnd } => {
+            Adapter::MpcHc { hwnd, .. } => {
                 if !window_alive(*hwnd) {
                     return Err("MPC-HC 窗口不存在".into());
                 }
@@ -366,6 +389,160 @@ mod real_device {
                 (real - want).abs() < 1e-6,
                 "{target_rate}× 下发后播放器实际是 {real}×，差了 {} 格",
                 ((real - want) / 0.1).round()
+            );
+        }
+    }
+
+    /// 极简 HTTP GET（播放器本地回读口专用）：这两个回读通道必须独立于我们
+    /// 自己的 player-ipc 客户端，否则「下发」与「验收」共用一套代码，验不出谎报
+    fn http_get(port: u16, path: &str, basic_auth: Option<&str>) -> String {
+        use std::io::{Read, Write};
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port))
+            .unwrap_or_else(|e| panic!("连不上 127.0.0.1:{port}（{e}），现场没备好？"));
+        s.set_read_timeout(Some(std::time::Duration::from_secs(4))).unwrap();
+        let auth = basic_auth.map(|a| format!("Authorization: Basic {a}\r\n")).unwrap_or_default();
+        // HTTP/1.0：响应即连接关闭，读到 EOF 就是读完，不用解析 Content-Length/分块
+        write!(s, "GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n{auth}\r\n").unwrap();
+        let mut buf = Vec::new();
+        s.read_to_end(&mut buf).unwrap_or_else(|e| panic!("读 {path} 失败：{e}"));
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    /// 从 MPC-HC `/variables.html` 里取 `<p id="...">值</p>`
+    fn mpc_variable(html: &str, id: &str) -> String {
+        let pat = format!("id=\"{id}\">");
+        let start = html
+            .find(&pat)
+            .map(|i| i + pat.len())
+            .unwrap_or_else(|| panic!("回读页里没有 {id} 字段"));
+        html[start..].chars().take_while(|c| *c != '<').collect()
+    }
+
+    /// MPC-HC 绝对倍速命令的生产链路核对（M4.9）。默认 `#[ignore]`，现场：
+    ///
+    /// ```text
+    /// # 起 MPC-HC 并带上 Web 回读口（无需前台，命令走 WM_COMMAND）
+    /// & "C:\Program Files\MPC-HC\mpc-hc64.exe" /webport 13579 <某个较长的媒体文件>
+    /// cargo test -- --ignored --nocapture mpc_hc_absolute
+    /// ```
+    ///
+    /// 协议层的 14 档逐条扫描已在 2026-08-31 做过（.tmp-mpc-probe.ps1，13/14 实测吻合，
+    /// 8× 是播放器渲染链上限、自报 8.0）。这里补的是**生产代码**那一段：
+    /// [`adapters_for`] 按类名现查窗口 → [`Adapter::set_rate`] 就近取档 → 查命令码 →
+    /// platform-win `send_message`，回读走播放器自己的 Web 口，与下发路径完全独立。
+    #[test]
+    #[ignore = "真机：需先起 MPC-HC（/webport 13579）并载入一个媒体文件"]
+    fn mpc_hc_absolute_commands_land_on_the_exact_rung() {
+        const PORT: u16 = 13579;
+        // 停→播：把可能已播完暂停的现场拉回「正在播放」，也顺便把进度倒回开头
+        http_get(PORT, "/command.html?wm_command=890", None);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        http_get(PORT, "/command.html?wm_command=887", None);
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let vars = http_get(PORT, "/variables.html", None);
+        assert_eq!(mpc_variable(&vars, "state"), "2", "MPC-HC 应处于播放中（state=2）");
+
+        let rule = built_in_rules()
+            .into_iter()
+            .find(|r| r.id == "mpc-hc")
+            .expect("内置规则应含 MPC-HC");
+        // hwnd 给 0：逼着 resolve_hwnd 走「按类名现查」，这正是生产里窗口重建后的路径
+        let target = CurrentTarget {
+            rule_id: rule.id.clone(),
+            hwnd: 0,
+            process_name: rule.process.clone(),
+        };
+        let adapters = adapters_for(&rule, &target);
+        let mpc = adapters
+            .iter()
+            .find(|a| matches!(a, Adapter::MpcHc { ladder: Some(_), .. }))
+            .expect("MPC-HC 应解析出带档位表的控制消息通道");
+
+        // 档内值原样落档 + 档间值就近取档：2.4 距 2.0 比距 3.0 近，必须吸到 2.0
+        for (target_rate, want) in [(2.0, 2.0), (2.4, 2.0), (1.1, 1.1), (6.0, 6.0), (0.25, 0.25)] {
+            let declared = mpc
+                .set_rate(target_rate)
+                .unwrap_or_else(|e| panic!("{target_rate}× 下发失败：{e}"));
+            assert_eq!(declared, Some(want), "{target_rate}× 的申报档位不对");
+
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let vars = http_get(PORT, "/variables.html", None);
+            let real: f64 = mpc_variable(&vars, "playbackrate").parse().expect("倍速应是数字");
+            assert!(
+                (real - want).abs() < 1e-3,
+                "{target_rate}× 下发后播放器自报 {real}×，应为 {want}×"
+            );
+        }
+
+        // reset 走 RESETRATE（MPC 全系通用），申报值与真实值都必须钉在 1.0
+        let declared = mpc.reset().expect("reset 失败");
+        assert_eq!(declared, Some(1.0));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let vars = http_get(PORT, "/variables.html", None);
+        let real: f64 = mpc_variable(&vars, "playbackrate").parse().unwrap();
+        assert!((real - 1.0).abs() < 1e-3, "reset 后播放器自报 {real}×");
+    }
+
+    /// 从 VLC `status.xml` 里取 `<rate>` 值
+    fn vlc_rate(port: u16) -> f64 {
+        // ":omnispeed" 的 Base64（VLC HTTP 口用户名恒为空）
+        let xml = http_get(port, "/requests/status.xml", Some("Om9tbmlzcGVlZA=="));
+        let start = xml.find("<rate>").map(|i| i + "<rate>".len()).expect("status.xml 里没有 rate");
+        let end = xml[start..].find("</rate>").unwrap() + start;
+        xml[start..end].trim().parse().expect("rate 应是数字")
+    }
+
+    /// VLC 按键网格的生产链路核对（M4.9）。默认 `#[ignore]`，现场：
+    ///
+    /// ```text
+    /// # 1. 起 VLC：HTTP 回读口 + 循环播放一个较长的媒体文件
+    /// & "C:\Program Files\VideoLAN\VLC\vlc.exe" --extraintf http --http-host 127.0.0.1 `
+    ///     --http-port 8080 --http-password omnispeed --repeat <媒体文件>
+    /// # 2. 预编译测试二进制（cargo test --no-run），再把 VLC 点到前台后立即跑：
+    /// cargo test -- --ignored --nocapture vlc_key_grid
+    /// ```
+    ///
+    /// 与百度那条一样：按键通道要求目标前台，而 cargo test 是后台进程抢不到前台，
+    /// 所以前台得提前备好，测试开头会拦一道。协议层网格（=/]/[ 步进、0ms 连发不丢键、
+    /// 边界 2.1/0.3 可达）已由 .tmp-vlc-probe.ps1 实测；这里走生产的
+    /// [`adapters_for`] → `Keys{grid}` → [`KeyRateGrid::plan`] → `send_key_plan`，
+    /// 回读走 VLC 自己的 HTTP 口（它读的是 input 层真实速率，与按键写的 playlist 层
+    /// 分属两层，恰好构成独立验收）。
+    #[test]
+    #[ignore = "真机：需先起 VLC（HTTP 口 + 播放中）并把它点到前台"]
+    fn vlc_key_grid_lands_on_the_exact_rate() {
+        const PORT: u16 = 8080;
+        let fg = platform_win::foreground_info().expect("桌面应有前台窗口");
+        assert_eq!(fg.process_name, "vlc.exe", "请先把 VLC 点到前台再跑本测试（当前前台：{}）", fg.title);
+
+        let rule = built_in_rules().into_iter().find(|r| r.id == "vlc").expect("内置规则应含 VLC");
+        let target = CurrentTarget {
+            rule_id: rule.id.clone(),
+            hwnd: fg.hwnd,
+            process_name: rule.process.clone(),
+        };
+        let adapters = adapters_for(&rule, &target);
+        let keys = adapters
+            .iter()
+            .find(|a| matches!(a, Adapter::Keys { grid: Some(_), .. }))
+            .expect("VLC 应解析出带倍速网格的按键通道");
+
+        // 纯锚点、向上/向下补格、非网格值吸附（1.37→1.4）、两侧边界（2.1 / 0.3）
+        for (target_rate, want) in
+            [(2.0, 2.0), (1.37, 1.4), (0.5, 0.5), (2.1, 2.1), (0.3, 0.3), (1.0, 1.0)]
+        {
+            let declared = keys
+                .set_rate(target_rate)
+                .unwrap_or_else(|e| panic!("{target_rate}× 下发失败：{e}"));
+            assert_eq!(declared, Some(want), "{target_rate}× 的计划回读值不对");
+
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let real = vlc_rate(PORT);
+            // VLC 内部以 1000/rate 的整数存倍速，读回带 ≤0.2% 量化误差（实测 1.5→1.5015），
+            // 网格吸附已把它收敛住，这里按 0.01 验收即可
+            assert!(
+                (real - want).abs() < 0.01,
+                "{target_rate}× 下发后 VLC 实际是 {real}×，应为 {want}×"
             );
         }
     }

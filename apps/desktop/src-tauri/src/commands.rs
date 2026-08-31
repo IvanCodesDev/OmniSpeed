@@ -137,8 +137,9 @@ pub fn save_app_rule(
             ipc: crate::rules::IpcKind::None,
             ipc_config: rule.ipc_config,
             keys: rule.keys,
-            // 倍速网格来自内置规则的真机调研，自定义规则暂不开放配置
+            // 倍速网格/档位表来自内置规则的真机调研与源码取证，自定义规则暂不开放配置
             key_rate: None,
+            rate_ladder: None,
             builtin: false,
         });
     }

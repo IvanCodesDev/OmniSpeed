@@ -3,6 +3,7 @@
 //! M2 内置 mpv / VLC / PotPlayer / MPC-HC 四家（开发文档 §11 M2 行）；
 //! 浏览器条目仅占位展示，真实接管等 M3 扩展接入。
 
+use player_ipc::mpc_hc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -193,12 +194,69 @@ pub struct AppRule {
     /// 属代码资产（同 process/kind），不随用户配置覆盖
     #[serde(default)]
     pub key_rate: Option<KeyRateGrid>,
+    /// 控制通道自身的**确定倍速档位表**（升序）：设速只会落在这些值上。
+    ///
+    /// 与 [`key_rate`](Self::key_rate) 的区别在通道而非形式——网格是「连按快捷键拼出来的」，
+    /// 因而有连发间隔与按键数上限；档位表是控制消息**一条到位**的（MPC-HC 的
+    /// `ID_PLAY_PLAYBACKRATE_*`），没有中间态，但只能落在表里这些值上。
+    /// 同属代码资产，不随用户配置覆盖。
+    #[serde(default)]
+    pub rate_ladder: Option<Vec<f64>>,
     pub builtin: bool,
 }
+
+/// 就近取档（[`AppRule::rate_ladder`]）：距离相同时取倍速小的那个。
+/// 与 [`KeyRateGrid::plan`] 的取舍一致——结果必须稳定可测，
+/// 不能随浮点误差在两档之间摇摆，否则同一个目标值两次下发会落到不同档上。
+pub fn snap_to_ladder(ladder: &[f64], target: f64) -> Option<f64> {
+    if !target.is_finite() {
+        return None;
+    }
+    ladder
+        .iter()
+        .copied()
+        .reduce(|best, cand| if (cand - target).abs() < (best - target).abs() { cand } else { best })
+}
+
+/// 档位表上的浮点容差：`Core.rate` 已被 `clamp_rate` 收到两位小数，
+/// 1e-6 足以把它吸附回档上，又不至于把相邻档误判成同一档
+const LADDER_EPS: f64 = 1e-6;
 
 impl AppRule {
     pub fn matches(&self, process_name: &str) -> bool {
         self.process == process_name || self.aliases.iter().any(|a| a == process_name)
+    }
+
+    /// 沿档位表挪一档（dir: +1 / -1）。`from` 不在档上时取该方向上第一个越过它的档；
+    /// 该方向已无档位则收到端点——热键连按到顶应停在最高档，既不绕回也不跳空。
+    pub fn ladder_step(&self, from: f64, dir: i32) -> Option<f64> {
+        let ladder = self.rate_ladder.as_deref()?;
+        if !from.is_finite() || dir == 0 {
+            return None;
+        }
+        let mut rungs = ladder.iter().copied();
+        if dir > 0 {
+            rungs.find(|r| *r > from + LADDER_EPS).or_else(|| ladder.last().copied())
+        } else {
+            rungs.rfind(|r| *r < from - LADDER_EPS).or_else(|| ladder.first().copied())
+        }
+    }
+
+    /// 该规则是否有**能读回真实倍速**的通道。
+    ///
+    /// 热键步进据此决定要不要先把目标值量化到按键网格上：有回读时异步拍会拿真实值
+    /// 校正 `Core.rate`，先量化只会白白把用户设的 0.25 步长撑成网格的 0.3；
+    /// 没有回读时（百度网盘、MPC-HC）就必须自己量化，否则 OSD 报的是播放器给不出的值。
+    pub fn can_read_back_rate(&self) -> bool {
+        if !matches!(self.method, RuleMethod::Auto | RuleMethod::Ipc) {
+            return false;
+        }
+        match self.ipc {
+            IpcKind::MpvIpc | IpcKind::VlcHttp | IpcKind::Cdp => true,
+            // PotPlayer 的 SDK 有 POT_GET_SPEED 可回读；MPC 系的 WM_COMMAND 一条回读也没有
+            IpcKind::WmCommand => self.id == "potplayer",
+            IpcKind::None => false,
+        }
     }
 
     /// 接管状态推导：浏览器等 M3 扩展；播放器只要有 IPC 或按键任一通道即视为已适配
@@ -222,6 +280,9 @@ impl AppRule {
             RuleMethod::Auto => {
                 if self.ipc == IpcKind::Cdp {
                     "CDP 接管".into()
+                } else if self.rate_ladder.is_some() {
+                    // 控制消息能一条到位，但只落在固定档位上，与"任意精确值"要区分开
+                    "控制消息 · 档位设速".into()
                 } else if self.ipc != IpcKind::None {
                     "IPC 接口 · 按键兜底".into()
                 } else {
@@ -257,6 +318,7 @@ pub fn built_in_rules() -> Vec<AppRule> {
             }),
             keys: keys("]", "[", "Backspace"),
             key_rate: None,
+            rate_ladder: None,
             builtin: true,
         },
         AppRule {
@@ -269,7 +331,27 @@ pub fn built_in_rules() -> Vec<AppRule> {
             ipc: IpcKind::VlcHttp,
             ipc_config: Some(IpcSettings { port: Some(8080), ..Default::default() }),
             keys: keys("]", "[", "="),
-            key_rate: None,
+            // HTTP 接口出厂没密码、装完即用的场景下基本不可用，按键才是 VLC 的常态通道。
+            // 好在 VLC 的按键语义正好是「锚点 + 均匀加性」，与本网格模型逐条对得上
+            // （`modules/control/hotkeys.c` 的 AdjustRateFine：
+            //  `floor(rate/0.1 + dir + 0.05) * 0.1`，即在 0.1 网格上整格挪一格且自带吸附；
+            //  `=` 走 ACTIONID_RATE_NORMAL → `var_SetFloat(rate, 1.f)`，是唯一的绝对锚点）
+            key_rate: Some(KeyRateGrid {
+                anchors: vec![RateAnchor { key: "=".into(), rate: 1.0 }],
+                step: 0.1,
+                // VLC 自身能到 0.03125×–31.25×（INPUT_RATE_DEFAULT / INPUT_RATE_MIN·MAX），
+                // 但只有 `=` 一个锚点，MAX_KEYS=12 就把按键通道的精确半径钉死在 ±1.1。
+                // 这里写按键真够得着的区间而不是 VLC 的理论区间：写宽了 plan() 会直接放弃，
+                // 退回开环单步——那才是 OSD 谎报的来源
+                min: 0.25,
+                max: 2.1,
+                // 真机标定（VLC 3.0.23）：11 连发 × 5 档间隔 × 3 轮，间隔 0/5/10/20/40ms
+                // 全部精确落到 2.1，一格没丢。结构上也应当如此——VLC 的步进是进程内
+                // `floor()` 现算现写，不像百度网盘那样要先异步读回当前倍速，
+                // 没有"后一次读到旧值"的窗口。取 20ms 纯属留余量，11 步共 220ms
+                step_gap_ms: 20,
+            }),
+            rate_ladder: None,
             builtin: true,
         },
         AppRule {
@@ -285,21 +367,45 @@ pub fn built_in_rules() -> Vec<AppRule> {
             method: RuleMethod::Auto,
             ipc: IpcKind::WmCommand,
             ipc_config: None,
+            // PotPlayer 闭源，C/X 的步长与上下限无从取证；SDK 又开箱即用，
+            // 按键只是深度兜底。与其抄一份「最佳努力值」，不如留空等真机标定
             keys: keys("C", "X", "Z"),
             key_rate: None,
+            rate_ladder: None,
             builtin: true,
         },
         AppRule {
             id: "mpc-hc".into(),
             name: "MPC-HC".into(),
             process: "mpc-hc64.exe".into(),
-            aliases: vec!["mpc-hc.exe".into(), "mpc-be64.exe".into(), "mpc-be.exe".into()],
+            aliases: vec!["mpc-hc.exe".into()],
             kind: AppKind::Player,
             method: RuleMethod::Auto,
             ipc: IpcKind::WmCommand,
             ipc_config: None,
             keys: keys("Ctrl+Up", "Ctrl+Down", "R"),
             key_rate: None,
+            // clsid2 维护版有 14 条绝对倍速命令，一条即到位（见 player_ipc::mpc_hc）。
+            // 这是 MPC-HC 唯一能申报确定值的路子：INC/DECRATE 出厂是倍增/减半且无回读，
+            // 靠它推算倍速从第一下就会与播放器对不上
+            rate_ladder: Some(mpc_hc::rate_ladder()),
+            builtin: true,
+        },
+        // MPC-BE 是独立分支，不能当作 MPC-HC 的 alias：窗口类名不同（`MPC-BE`），
+        // 且**没有**绝对倍速命令（源码全文无 PLAYBACKRATE），只有 894/895/896 与 HC 一致。
+        // 混在一起会让我们把绝对码发给一个不认它的播放器——静默 no-op，还申报成功
+        AppRule {
+            id: "mpc-be".into(),
+            name: "MPC-BE".into(),
+            process: "mpc-be64.exe".into(),
+            aliases: vec!["mpc-be.exe".into()],
+            kind: AppKind::Player,
+            method: RuleMethod::Auto,
+            ipc: IpcKind::WmCommand,
+            ipc_config: None,
+            keys: keys("Ctrl+Up", "Ctrl+Down", "R"),
+            key_rate: None,
+            rate_ladder: None,
             builtin: true,
         },
         // 平台桌面客户端（Chromium 套壳，CDP 接管；进程名即客户端 exe 名）。
@@ -315,6 +421,7 @@ pub fn built_in_rules() -> Vec<AppRule> {
             ipc_config: Some(IpcSettings { port: Some(9333), ..Default::default() }),
             keys: None,
             key_rate: None,
+            rate_ladder: None,
             builtin: true,
         },
         // 百度网盘桌面端：同样是 Electron 套壳，但**播放器不是 HTML5 的**——
@@ -346,6 +453,7 @@ pub fn built_in_rules() -> Vec<AppRule> {
                 // 取 150ms 留一档余量，满打满算 6 键约 750ms，OSD 由同步链路先行显示
                 step_gap_ms: 150,
             }),
+            rate_ladder: None,
             builtin: true,
         },
         AppRule {
@@ -359,6 +467,7 @@ pub fn built_in_rules() -> Vec<AppRule> {
             ipc_config: None,
             keys: None,
             key_rate: None,
+            rate_ladder: None,
             builtin: true,
         },
         AppRule {
@@ -372,6 +481,7 @@ pub fn built_in_rules() -> Vec<AppRule> {
             ipc_config: None,
             keys: None,
             key_rate: None,
+            rate_ladder: None,
             builtin: true,
         },
         AppRule {
@@ -385,6 +495,7 @@ pub fn built_in_rules() -> Vec<AppRule> {
             ipc_config: None,
             keys: None,
             key_rate: None,
+            rate_ladder: None,
             builtin: true,
         },
     ]
@@ -435,6 +546,8 @@ pub struct AppInfo {
     pub ipc_config: Option<IpcSettings>,
     /// 有值 = 该应用的按键通道能精确设速，应用页据此说明可用区间与精度
     pub key_rate: Option<KeyRateGrid>,
+    /// 有值 = 该应用只能落在这些确定倍速上（控制消息的档位表），应用页据此列出可选档位
+    pub rate_ladder: Option<Vec<f64>>,
 }
 
 /// connected：扩展已连接的浏览器进程名集合（NM 桥维护），
@@ -465,6 +578,7 @@ pub fn to_app_info(
         keys: rule.keys.clone(),
         ipc_config: rule.ipc_config.clone(),
         key_rate: rule.key_rate.clone(),
+        rate_ladder: rule.rate_ladder.clone(),
     }
 }
 
@@ -672,17 +786,145 @@ mod tests {
         assert!(mpc.key_rate.is_none());
     }
 
-    /// 用户配置不得覆盖内置规则的倍速网格（同 process/kind，属代码资产）
+    /// 用户配置不得覆盖内置规则的倍速网格与档位表（同 process/kind，属代码资产）
     #[test]
     fn saved_config_cannot_clobber_builtin_grid() {
         let mut rules = built_in_rules();
         let mut stale = rules.iter().find(|r| r.id == "baidu-netdisk").unwrap().clone();
         stale.key_rate = None;
         stale.keys = Some(KeyBindings { up: "]".into(), down: "[".into(), reset: "=".into() });
-        merge_saved(&mut rules, vec![stale]);
+        let mut stale_mpc = rules.iter().find(|r| r.id == "mpc-hc").unwrap().clone();
+        stale_mpc.rate_ladder = None;
+        merge_saved(&mut rules, vec![stale, stale_mpc]);
 
         let rule = rules.iter().find(|r| r.id == "baidu-netdisk").unwrap();
         assert!(rule.key_rate.is_some(), "网格来自代码，不该被旧配置抹掉");
         assert_eq!(rule.keys.as_ref().unwrap().up, "]", "键位仍应尊重用户改动");
+        let mpc = rules.iter().find(|r| r.id == "mpc-hc").unwrap();
+        assert!(mpc.rate_ladder.is_some(), "档位表同属代码资产，不该被旧配置抹掉");
+    }
+
+    fn rule(id: &str) -> AppRule {
+        built_in_rules().into_iter().find(|r| r.id == id).unwrap_or_else(|| panic!("缺内置规则 {id}"))
+    }
+
+    /// VLC 的键位与网格逐条对应官方源码（`hotkeys.c` 的 AdjustRateFine +
+    /// `libvlc-module.c` 的默认键位），改动这几个数字前先回源码核对
+    #[test]
+    fn vlc_grid_matches_the_source() {
+        let vlc = rule("vlc");
+        let keys = vlc.keys.clone().expect("VLC 应带按键");
+        assert_eq!((keys.up.as_str(), keys.down.as_str(), keys.reset.as_str()), ("]", "[", "="));
+
+        let grid = vlc.key_rate.clone().expect("VLC 应带倍速网格");
+        assert_eq!(grid.step, 0.1, "AdjustRateFine 是 0.1 的整格步进");
+        // ACTIONID_RATE_NORMAL 直接 var_SetFloat(rate, 1.f)，是 VLC 唯一的绝对锚点
+        assert_eq!(grid.anchors.len(), 1);
+        assert_eq!((grid.anchors[0].key.as_str(), grid.anchors[0].rate), ("=", 1.0));
+
+        // 连发间隔是实测资产，不是默认值：VLC 3.0.23 上 0–40ms 连发 11 次一格没丢，
+        // 与百度网盘那条异步读回的通道不是一回事，别再套用 150ms
+        assert_eq!(grid.step_gap_ms, 20);
+        assert_ne!(grid.step_gap_ms, default_step_gap_ms(), "已标定过，不该再退回默认值");
+
+        // 1× 一键到位；两侧各能精确走到边界，全程不超过 MAX_KEYS
+        assert_eq!(grid.plan(&keys, 1.0).unwrap().steps, 0);
+        let up = grid.plan(&keys, 1.5).unwrap();
+        assert_eq!((up.anchor.as_str(), up.step_key.as_str(), up.steps, up.rate), ("=", "]", 5, 1.5));
+        let down = grid.plan(&keys, 0.6).unwrap();
+        assert_eq!((down.step_key.as_str(), down.steps, down.rate), ("[", 4, 0.6));
+    }
+
+    /// 网格区间必须写「按键真够得着」的范围而不是 VLC 的理论区间：
+    /// 单锚点 + MAX_KEYS=12 决定了精确半径只有 ±1.1，写宽了 plan() 会放弃、
+    /// 退回开环单步——OSD 谎报正是从那里来的
+    #[test]
+    fn vlc_range_is_what_the_keys_can_actually_reach() {
+        let vlc = rule("vlc");
+        let keys = vlc.keys.clone().unwrap();
+        let grid = vlc.key_rate.clone().unwrap();
+        assert_eq!((grid.min, grid.max), (0.25, 2.1));
+
+        // 区间内每一档都必须算得出计划，且终值精确等于对齐后的目标
+        for tenths in 3..=21 {
+            let target = f64::from(tenths) / 10.0;
+            let plan = grid.plan(&keys, target).unwrap_or_else(|| panic!("{target}× 应可达"));
+            assert_eq!((plan.rate * 10.0).round() as i64, i64::from(tenths));
+        }
+        // 超出区间收敛到端点，而不是返回 None 让上层瞎按
+        assert_eq!(grid.plan(&keys, 6.0).unwrap().rate, 2.1);
+    }
+
+    /// MPC-HC 接线：档位表来自绝对倍速命令表，且每一档都能查到命令码
+    #[test]
+    fn mpc_hc_is_wired_to_the_absolute_rate_commands() {
+        let mpc = rule("mpc-hc");
+        assert_eq!(mpc.ipc, IpcKind::WmCommand);
+        assert_eq!(mpc.method_label(), "控制消息 · 档位设速");
+        let ladder = mpc.rate_ladder.clone().expect("MPC-HC 应带档位表");
+        assert_eq!(ladder, mpc_hc::rate_ladder());
+        for rung in &ladder {
+            assert!(mpc_hc::command_for(*rung).is_some(), "{rung}× 查不到命令码");
+        }
+        // 就近取档的结果必须仍在表内——适配器拿它去查命令码，落在档间就发不出去
+        for target in [0.1, 1.0, 1.2, 2.4, 2.5, 7.0, 99.0] {
+            let snapped = snap_to_ladder(&ladder, target).unwrap();
+            assert!(mpc_hc::command_for(snapped).is_some(), "{target}× 取到的档不在表内");
+        }
+        assert_eq!(snap_to_ladder(&ladder, 2.5), Some(2.0), "同距取小，结果要稳定");
+        assert_eq!(snap_to_ladder(&ladder, 99.0), Some(8.0), "越界收到端点");
+        assert_eq!(snap_to_ladder(&ladder, f64::NAN), None);
+    }
+
+    /// 热键沿档位表走：一次一档。档距不均匀（2 的上一档是 3 不是 2.25），
+    /// 按 rate ± step 算会得到表里没有的值，下发时被吸回原档 —— 热键就此卡死
+    #[test]
+    fn mpc_hc_hotkey_walks_one_rung() {
+        let mpc = rule("mpc-hc");
+        assert_eq!(mpc.ladder_step(1.0, 1), Some(1.1));
+        assert_eq!(mpc.ladder_step(1.1, 1), Some(1.25));
+        assert_eq!(mpc.ladder_step(1.0, -1), Some(0.9));
+        assert_eq!(mpc.ladder_step(2.0, 1), Some(3.0), "2× 之后是 3×，不是 2.25×");
+        // 不在档上时取该方向第一个越过它的档
+        assert_eq!(mpc.ladder_step(2.4, 1), Some(3.0));
+        assert_eq!(mpc.ladder_step(2.4, -1), Some(2.0));
+        // 端点停住：连按到顶不该绕回最低档
+        assert_eq!(mpc.ladder_step(8.0, 1), Some(8.0));
+        assert_eq!(mpc.ladder_step(0.25, -1), Some(0.25));
+        assert_eq!(mpc.ladder_step(f64::NAN, 1), None);
+        assert_eq!(mpc.ladder_step(1.0, 0), None);
+        // 没有档位表的规则不该走这条路
+        assert_eq!(rule("vlc").ladder_step(1.0, 1), None);
+    }
+
+    /// MPC-BE 必须与 MPC-HC 分家：类名、命令集都不同，
+    /// 绝对倍速码发给 BE 是静默 no-op —— 混作 alias 就会「申报成功但倍速没动」
+    #[test]
+    fn mpc_be_is_a_separate_rule_without_the_ladder() {
+        let be = rule("mpc-be");
+        assert!(be.rate_ladder.is_none(), "BE 源码里没有 PLAYBACKRATE 命令");
+        assert!(be.matches("mpc-be64.exe") && be.matches("mpc-be.exe"));
+
+        let hc = rule("mpc-hc");
+        assert!(hc.matches("mpc-hc64.exe") && hc.matches("mpc-hc.exe"));
+        assert!(!hc.matches("mpc-be64.exe"), "BE 不能再被 MPC-HC 规则吃掉");
+        assert!(!hc.matches("mpc-be.exe"));
+    }
+
+    /// 回读判据决定热键要不要先自我量化。判错的代价是双向的：
+    /// 该量化没量化 → OSD 报播放器给不出的值；不该量化却量化 → 步长被网格撑大
+    #[test]
+    fn read_back_capability_is_per_channel() {
+        for id in ["mpv", "vlc", "potplayer", "bilibili-client"] {
+            assert!(rule(id).can_read_back_rate(), "{id} 有回读通道");
+        }
+        // MPC 系的 WM_COMMAND 一条回读也没有；百度网盘压根没有 IPC
+        for id in ["mpc-hc", "mpc-be", "baidu-netdisk", "chrome"] {
+            assert!(!rule(id).can_read_back_rate(), "{id} 不该被当作可回读");
+        }
+        // 用户把控制方式改成「仅快捷键」后 IPC 不再参与，回读也就没了
+        let mut vlc = rule("vlc");
+        vlc.method = RuleMethod::Hotkey;
+        assert!(!vlc.can_read_back_rate());
     }
 }

@@ -110,6 +110,24 @@ function KeyRateNote({ keyRate }: { keyRate: AppKeyRate }) {
   );
 }
 
+/**
+ * 该播放器的控制消息只提供固定几档绝对倍速（MPC-HC 的「播放 → 速度」菜单命令），
+ * 一条消息即到位、不需要窗口在前台，但倍速只能落在这些档上。
+ * 档距不均匀，所以要把档位逐个列出来，而不是像网格那样说一个「精度」。
+ */
+function RateLadderNote({ ladder }: { ladder: number[] }) {
+  return (
+    <p className="rounded-xl border border-accent/25 bg-accent/[0.06] px-3 py-2.5 text-[12px] leading-relaxed text-ink-2">
+      该播放器通过控制消息设速，一步到位且不需要窗口在前台，但倍速只能落在固定档位上：
+      <br />
+      <b>{ladder.map((r) => `${r}×`).join(" · ")}</b>
+      <br />
+      滑块与预设设成档位之间的值时会就近取档（如 2.4× 落到 2×），热键则一次挪一档。
+      OSD 显示的始终是取档后的值，与播放器实际倍速一致。
+    </p>
+  );
+}
+
 /** Chromium 套壳客户端（B 站桌面端等）的 CDP 接管面板（M4.5） */
 function CdpPanel({ app }: { app: AppInfo }) {
   const [busy, setBusy] = useState(false);
@@ -329,7 +347,6 @@ function RuleEditor({ app }: { app: AppInfo }) {
           <p className="rounded-xl bg-card-2/60 px-3 py-2.5 text-[12px] leading-relaxed text-mute">
             这里绑定的是目标软件自身的调速快捷键，OmniSpeed 会替你按下；与「快捷键」页的全局快捷键是两回事。
           </p>
-          {app.keyRate && <KeyRateNote keyRate={app.keyRate} />}
         </div>
       )}
 
@@ -339,6 +356,19 @@ function RuleEditor({ app }: { app: AppInfo }) {
           <br />
           适用于常见网课客户端（实验特性）
         </p>
+      )}
+
+      {/* 这两条讲的是该应用**能力**上的边界（倍速只能落在哪些值上），
+          与编辑器里当前选的控制方式无关，因此放在各分支之外常驻 */}
+      {app.keyRate && (
+        <div className="mt-4">
+          <KeyRateNote keyRate={app.keyRate} />
+        </div>
+      )}
+      {app.rateLadder && (
+        <div className="mt-4">
+          <RateLadderNote ladder={app.rateLadder} />
+        </div>
       )}
 
       <button

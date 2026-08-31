@@ -59,6 +59,12 @@ export interface AppInfo {
   ipcConfig: AppIpcConfig | null;
   /** 非空 = 按键通道可精确设速，应用页据此说明可用区间与精度 */
   keyRate: AppKeyRate | null;
+  /**
+   * 非空 = 该应用的倍速只能落在这几个确定档位上（Rust `rate_ladder`）。
+   * 与 keyRate 的区别在通道：网格是连按快捷键拼出来的，档位表是控制消息一条到位的
+   * （MPC-HC 的绝对倍速命令），没有中间态，但也只有表里这些值。
+   */
+  rateLadder: number[] | null;
 }
 
 /** 「应用页」保存规则的提交体（Rust `save_app_rule`，返回更新后的完整列表） */
@@ -127,6 +133,7 @@ export const managedApps: AppInfo[] = [
     keys: null,
     ipcConfig: null,
     keyRate: null,
+    rateLadder: null,
   },
   {
     id: "chrome",
@@ -142,6 +149,7 @@ export const managedApps: AppInfo[] = [
     keys: null,
     ipcConfig: null,
     keyRate: null,
+    rateLadder: null,
   },
   {
     id: "vlc",
@@ -156,7 +164,14 @@ export const managedApps: AppInfo[] = [
     builtin: true,
     keys: { up: "]", down: "[", reset: "=" },
     ipcConfig: { pipe: null, port: 8080, password: null },
-    keyRate: null,
+    keyRate: {
+      anchors: [{ key: "=", rate: 1 }],
+      step: 0.1,
+      min: 0.25,
+      max: 2.1,
+      stepGapMs: 150,
+    },
+    rateLadder: null,
   },
   {
     id: "potplayer",
@@ -172,6 +187,23 @@ export const managedApps: AppInfo[] = [
     keys: { up: "C", down: "X", reset: "Z" },
     ipcConfig: null,
     keyRate: null,
+    rateLadder: null,
+  },
+  {
+    id: "mpc-hc",
+    name: "MPC-HC",
+    process: "mpc-hc64.exe",
+    kind: "player",
+    status: "adapted",
+    method: "auto",
+    methodLabel: "控制消息 · 档位设速",
+    ipc: "wm-command",
+    running: false,
+    builtin: true,
+    keys: { up: "Ctrl+Up", down: "Ctrl+Down", reset: "R" },
+    ipcConfig: null,
+    keyRate: null,
+    rateLadder: [0.25, 0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 3, 4, 6, 8],
   },
   {
     id: "mpv",
@@ -187,6 +219,7 @@ export const managedApps: AppInfo[] = [
     keys: { up: "]", down: "[", reset: "Backspace" },
     ipcConfig: { pipe: "\\\\.\\pipe\\mpvsocket", port: null, password: null },
     keyRate: null,
+    rateLadder: null,
   },
   {
     id: "bilibili-client",
@@ -202,6 +235,7 @@ export const managedApps: AppInfo[] = [
     keys: null,
     ipcConfig: { pipe: null, port: 9333, password: null },
     keyRate: null,
+    rateLadder: null,
   },
   {
     id: "baidu-netdisk",
@@ -223,6 +257,7 @@ export const managedApps: AppInfo[] = [
       max: 5,
       stepGapMs: 150,
     },
+    rateLadder: null,
   },
   {
     id: "unknown",
@@ -238,6 +273,7 @@ export const managedApps: AppInfo[] = [
     keys: null,
     ipcConfig: null,
     keyRate: null,
+    rateLadder: null,
   },
 ];
 

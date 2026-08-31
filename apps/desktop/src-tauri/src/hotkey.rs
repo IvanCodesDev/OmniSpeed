@@ -200,14 +200,29 @@ fn is_browser_target(core: &Core) -> bool {
         || (core.current.is_none() && !core.connected_browsers.is_empty())
 }
 
-/// 步进目标值。接管对象若只认按键（百度网盘这类），它的倍速就只能落在自己的网格上，
-/// 那就按整格走：OSD 当场显示的即是播放器真会到的值，不必等回读回来再改口。
+/// 步进目标值。接管对象的倍速若只能落在有限几个值上，就按它自己的档位走：
+/// OSD 当场显示的即是播放器真会到的值，不必等回读回来再改口。
+///
+/// 三条路，按「离播放器真相有多近」排序：
+/// 1. 有档位表（MPC-HC 的绝对倍速命令）→ 一次挪一档。档距不均匀，`rate ± step`
+///    会算出 2.25 这种表里没有的值，下发时被就近吸回 2.0，热键从此卡死在 2.0；
+/// 2. 无回读 + 有按键网格（百度网盘）→ 按整格走，理由同上一条；
+/// 3. 其余（mpv / VLC / PotPlayer / 浏览器）→ 原样加减。这些通道能回读，
+///    异步拍会拿真实值校正，先量化只会把用户设的 0.25 步长白白撑成网格的 0.3。
 fn stepped_rate(core: &Core, dir: i32) -> f64 {
     let step = core.settings.step;
-    core.current_rule()
-        .and_then(|rule| rule.key_rate.as_ref())
+    let fallback = core.rate + step * f64::from(dir);
+    let Some(rule) = core.current_rule() else { return fallback };
+    if let Some(rung) = rule.ladder_step(core.rate, dir) {
+        return rung;
+    }
+    if rule.can_read_back_rate() {
+        return fallback;
+    }
+    rule.key_rate
+        .as_ref()
         .and_then(|grid| grid.step_target(core.rate, step, dir))
-        .unwrap_or_else(|| core.rate + step * f64::from(dir))
+        .unwrap_or(fallback)
 }
 
 /// 浏览器内核上限 16×；滑块上限只约束控制页 UI，不该挡住全局热键打到网页视频。
