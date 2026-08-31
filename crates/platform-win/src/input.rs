@@ -6,11 +6,12 @@
 //! 必要时先经 [`crate::bring_to_foreground`] 激活。
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    MapVirtualKeyW, SendInput, VkKeyScanW, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, VIRTUAL_KEY,
-    VK_APPS, VK_BACK, VK_CONTROL, VK_DELETE, VK_DIVIDE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_HOME,
-    VK_INSERT, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_NUMLOCK, VK_PRIOR, VK_RCONTROL, VK_RETURN,
-    VK_RIGHT, VK_RMENU, VK_RWIN, VK_SHIFT, VK_SNAPSHOT, VK_SPACE, VK_TAB, VK_UP,
+    GetAsyncKeyState, MapVirtualKeyW, SendInput, VkKeyScanW, INPUT, INPUT_0, INPUT_KEYBOARD,
+    KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC,
+    VIRTUAL_KEY, VK_APPS, VK_BACK, VK_CONTROL, VK_DELETE, VK_DIVIDE, VK_DOWN, VK_END, VK_ESCAPE,
+    VK_F1, VK_HOME, VK_INSERT, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
+    VK_NEXT, VK_NUMLOCK, VK_PRIOR, VK_RCONTROL, VK_RETURN, VK_RIGHT, VK_RMENU, VK_RSHIFT, VK_RWIN,
+    VK_SHIFT, VK_SNAPSHOT, VK_SPACE, VK_TAB, VK_UP,
 };
 
 use crate::Error;
@@ -139,9 +140,59 @@ fn resolve_main_key(main: &str) -> Option<(u16, bool, bool, bool)> {
     Some((vk, state & 1 != 0, state & 2 != 0, state & 4 != 0))
 }
 
-/// 用 SendInput 发送组合键：按下修饰键 → 主键按下/抬起 → 逆序释放修饰键。
-/// 整个序列一次性批量提交，期间不会被用户的真实输入插队。
-pub fn send_key_combo(combo: KeyCombo) -> Result<(), Error> {
+/// 发送前要临时抬起的物理修饰键，左右分开列出——只放开真正按着的那一侧，
+/// 免得把没按的那侧也“按回去”。顺序即抬起顺序：Ctrl 垫在最后（见 [`build_sequence`]）。
+const NEUTRALIZE_ORDER: [VIRTUAL_KEY; 8] = [
+    VK_LSHIFT,
+    VK_RSHIFT,
+    VK_LWIN,
+    VK_RWIN,
+    VK_LMENU,
+    VK_RMENU,
+    VK_LCONTROL,
+    VK_RCONTROL,
+];
+
+/// 此刻物理按着的修饰键（GetAsyncKeyState 高位 = 按下）
+fn held_modifiers() -> Vec<u16> {
+    NEUTRALIZE_ORDER
+        .iter()
+        // SAFETY: 纯状态查询，无前置条件
+        .filter(|vk| unsafe { GetAsyncKeyState(i32::from(vk.0)) } < 0)
+        .map(|vk| vk.0)
+        .collect()
+}
+
+/// 组装一次发送的完整键序 `(vk, 是否抬起)`：中和物理修饰键 → 目标组合键 → 复原物理修饰键。
+///
+/// 为什么要中和：热键是 Ctrl+Alt+↑ 这类带修饰键的组合，触发的瞬间用户十有八九还按着
+/// Ctrl+Alt，此时直接发播放器的 `.`／`,` 会被系统合成 `Ctrl+Alt+.` 递给播放器，播放器
+/// 不认这个组合就整个丢掉——真机上表现为 OSD 跳到目标值、画面倍速纹丝不动。
+///
+/// 为什么发完还要按回去：用户按住 Ctrl+Alt 连点 ↑ 是常规用法，修饰键若停在抬起状态，
+/// 后续几下 RegisterHotKey 就不再匹配，连点会从第二下开始失灵。
+fn build_sequence(held: &[u16], combo: KeyCombo) -> Vec<(u16, bool)> {
+    let mut seq: Vec<(u16, bool)> = Vec::with_capacity(held.len() * 2 + 10);
+
+    // Alt／Win 单独抬起会被系统读成「呼出窗口菜单／开始菜单」；而 Ctrl 按着时抬 Alt 只发
+    // WM_KEYUP（见 WM_SYSKEYUP 文档），Win 同理。held 里本来就有 Ctrl 时天然满足——
+    // NEUTRALIZE_ORDER 已把 Ctrl 排在 Alt/Win 之后；没有 Ctrl 才临时垫一个。
+    let has_ctrl = held
+        .iter()
+        .any(|&vk| vk == VK_LCONTROL.0 || vk == VK_RCONTROL.0);
+    let needs_mask = !has_ctrl
+        && held.iter().any(|&vk| {
+            vk == VK_LMENU.0 || vk == VK_RMENU.0 || vk == VK_LWIN.0 || vk == VK_RWIN.0
+        });
+
+    if needs_mask {
+        seq.push((VK_LCONTROL.0, false));
+    }
+    seq.extend(held.iter().map(|&vk| (vk, true)));
+    if needs_mask {
+        seq.push((VK_LCONTROL.0, true));
+    }
+
     let mut order: Vec<u16> = Vec::with_capacity(4);
     if combo.ctrl {
         order.push(VK_CONTROL.0);
@@ -153,10 +204,23 @@ pub fn send_key_combo(combo: KeyCombo) -> Result<(), Error> {
         order.push(VK_SHIFT.0);
     }
     order.push(combo.vk);
+    seq.extend(order.iter().map(|&vk| (vk, false)));
+    seq.extend(order.iter().rev().map(|&vk| (vk, true)));
 
-    let mut inputs: Vec<INPUT> = Vec::with_capacity(order.len() * 2);
-    inputs.extend(order.iter().map(|&vk| key_input(vk, false)));
-    inputs.extend(order.iter().rev().map(|&vk| key_input(vk, true)));
+    seq.extend(held.iter().rev().map(|&vk| (vk, false)));
+    seq
+}
+
+/// 用 SendInput 发送组合键：中和用户按着的修饰键 → 按下修饰键 → 主键按下/抬起 →
+/// 逆序释放修饰键 → 复原用户的修饰键（详见 [`build_sequence`]）。
+///
+/// 整个序列一次性批量提交，SendInput 保证其间不会被用户的真实输入插队——中和与复原之间
+/// 不存在“修饰键半开”的时间窗，用户按住 ↑ 的自动重复也挤不进来。
+pub fn send_key_combo(combo: KeyCombo) -> Result<(), Error> {
+    let inputs: Vec<INPUT> = build_sequence(&held_modifiers(), combo)
+        .into_iter()
+        .map(|(vk, key_up)| key_input(vk, key_up))
+        .collect();
 
     // SAFETY: inputs 数组在调用期间有效，cbsize 与元素类型一致
     let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
@@ -226,7 +290,7 @@ fn is_extended_key(vk: u16) -> bool {
 mod tests {
     use super::*;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        VK_F12, VK_F5, VK_OEM_4, VK_OEM_6, VK_OEM_PERIOD, VK_OEM_PLUS,
+        VK_F12, VK_F5, VK_OEM_4, VK_OEM_6, VK_OEM_COMMA, VK_OEM_PERIOD, VK_OEM_PLUS,
     };
 
     fn combo(ctrl: bool, alt: bool, shift: bool, vk: u16) -> KeyCombo {
@@ -337,5 +401,93 @@ mod tests {
         ] {
             assert_eq!(parse_key(bad), None, "应拒绝的输入：{bad:?}");
         }
+    }
+
+    /// 百度网盘的步进键 ","（无修饰键的裸键）
+    fn comma() -> KeyCombo {
+        combo(false, false, false, VK_OEM_COMMA.0)
+    }
+
+    /// 没人按着修饰键时，键序与「按下主键、抬起主键」完全一致，不夹带任何多余事件
+    #[test]
+    fn sends_plain_combo_when_nothing_held() {
+        assert_eq!(
+            build_sequence(&[], comma()),
+            vec![(VK_OEM_COMMA.0, false), (VK_OEM_COMMA.0, true)]
+        );
+    }
+
+    /// 真机复现的那一幕：热键 Ctrl+Alt+↓ 触发时用户还按着 Ctrl+Alt，
+    /// 步进键必须先把这两个键抬掉再发，发完原样按回去（否则连点第二下起热键就不匹配了）
+    #[test]
+    fn neutralizes_and_restores_held_ctrl_alt() {
+        // held 由 NEUTRALIZE_ORDER 过滤而来，Alt 必定排在 Ctrl 前面
+        let held = [VK_LMENU.0, VK_LCONTROL.0];
+        assert_eq!(
+            build_sequence(&held, comma()),
+            vec![
+                (VK_LMENU.0, true),
+                (VK_LCONTROL.0, true),
+                (VK_OEM_COMMA.0, false),
+                (VK_OEM_COMMA.0, true),
+                (VK_LCONTROL.0, false),
+                (VK_LMENU.0, false),
+            ]
+        );
+    }
+
+    /// 组合键自带的修饰键照常发送，中和只针对用户物理按着的那些
+    #[test]
+    fn keeps_combo_own_modifiers() {
+        let seq = build_sequence(&[VK_LCONTROL.0], combo(true, false, false, VK_UP.0));
+        assert_eq!(
+            seq,
+            vec![
+                (VK_LCONTROL.0, true),
+                (VK_CONTROL.0, false),
+                (VK_UP.0, false),
+                (VK_UP.0, true),
+                (VK_CONTROL.0, true),
+                (VK_LCONTROL.0, false),
+            ]
+        );
+    }
+
+    /// 只按着 Alt（或 Win）时，抬起动作要垫一个临时 Ctrl 遮住，
+    /// 否则系统会把这次抬起当成「呼出窗口菜单／开始菜单」
+    #[test]
+    fn masks_lone_alt_or_win_release_with_ctrl() {
+        for lone in [VK_LMENU.0, VK_RMENU.0, VK_LWIN.0, VK_RWIN.0] {
+            let seq = build_sequence(&[lone], comma());
+            assert_eq!(
+                &seq[..3],
+                &[
+                    (VK_LCONTROL.0, false),
+                    (lone, true),
+                    (VK_LCONTROL.0, true)
+                ],
+                "vk={lone:#x} 的抬起未被 Ctrl 遮住"
+            );
+            assert_eq!(seq.last(), Some(&(lone, false)), "vk={lone:#x} 未复原");
+        }
+    }
+
+    /// 已经按着 Ctrl 就不必再垫：NEUTRALIZE_ORDER 把 Ctrl 排在末位，抬 Alt 时它还按着
+    #[test]
+    fn skips_mask_when_ctrl_already_held() {
+        let seq = build_sequence(&[VK_LMENU.0, VK_RCONTROL.0], comma());
+        assert_eq!(seq[0], (VK_LMENU.0, true));
+        assert_eq!(seq[1], (VK_RCONTROL.0, true));
+    }
+
+    /// Shift 单独抬起没有副作用，不需要垫 Ctrl
+    #[test]
+    fn skips_mask_for_lone_shift() {
+        let seq = build_sequence(&[VK_RSHIFT.0], comma());
+        assert!(
+            !seq.iter().any(|&(vk, _)| vk == VK_LCONTROL.0),
+            "Shift 不该触发 Ctrl 遮罩：{seq:?}"
+        );
+        assert_eq!(seq[0], (VK_RSHIFT.0, true));
     }
 }
